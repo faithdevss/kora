@@ -70,3 +70,31 @@ src/
 6. WEEK meter UI copy reads "tracked usage" (or equivalent honest phrasing), never implies it's an authoritative account quota/limit unless a real quota API was confirmed and wired during implementation.
 7. Closing and reopening the app restores saved sessions (names, transcripts, pin/archive state) via `/session list`; exporting a session produces a file that imports cleanly into a fresh install.
 8. A subscription-auth (Pro/Max) account never shows an unqualified dollar "cost" figure — either labeled "estimated API-equivalent" or tokens-only.
+
+---
+
+## Spike Results — account model, auth, and models
+
+Run against `claude` 2.1.223 on 2026-08-07, before any implementation. Three findings changed the design; the amendments they imply are listed at the end.
+
+### What was tested
+
+| # | Question | Result |
+|---|---|---|
+| 1 | Does the CLI support per-account auth isolation? | **Yes, via `CLAUDE_CONFIG_DIR`.** Pointing it at a fresh directory yields `{"loggedIn": false, "authMethod": "none"}` while the default profile stays logged in. The CLI creates and owns everything inside that directory. |
+| 2 | Can Kora identify an account without handling its credential? | **Yes.** `claude auth status` prints JSON: `loggedIn`, `authMethod` (`claude.ai` for subscription login), `apiProvider`, `email`, `orgId`, `orgName`, `subscriptionType` (`pro`). That is real account identity *and* the auth-type signal acceptance criterion 8 needs, with no secret involved. |
+| 3 | How is an account added? | `claude auth login` (interactive, browser) / `auth logout` / `auth status`. There is also `setup-token` for a long-lived subscription token. |
+| 4 | Can the real model list be queried? | **Yes** — `control_request` with `{"subtype": "list_models"}` returns each model's `value`, `resolvedModel`, `displayName`, `description`, and capability flags, live from the authenticated CLI. Free: no API call. |
+| 5 | Is the mockup's model list still accurate? | **No.** The real list is Default/Sonnet 5, Opus 5, Haiku 4.5, and Fable; the Phase 1 fixture still names `claude-opus-4.1` and friends, which are not values the CLI accepts. |
+
+### Decision — accounts are config directories, and Kora stores no credentials
+
+Each Kora account is a `CLAUDE_CONFIG_DIR` under Kora's app-support directory. Adding an account runs the CLI's own `auth login` against a new directory; Claude Code stores its credential wherever it normally does, and Kora persists only `{ id, name, dir, email, orgName, authMethod, subscriptionType }` — all of it non-secret, all of it obtained from `auth status`.
+
+This is what the master plan's Security #6 asks for ("prefer native credential-scoping mechanisms over env vars"), and it is stronger than the original plan: there is no Kora-owned secret to leak, to log, or to migrate. The one env var involved (`CLAUDE_CONFIG_DIR`) carries a path, never a credential.
+
+### Amendments to this phase file
+
+1. **Keychain integration is not implemented, and that is deliberate.** The in-scope bullet assumed Kora would store credentials in the macOS Keychain. It does not, because it never possesses one. **Acceptance criterion 2 is therefore restated:** Kora must store no credential material on disk at all — verified by inspecting its own account store for anything secret-shaped — rather than by finding a Kora-owned keychain entry. API-key accounts (which would need Kora-held secrets) are deferred; if they are added later, the keychain path in the original bullet applies to them alone.
+2. **The WEEK meter caveat is withdrawn**, as already amended in `00-master-plan.md` after the Phase 2 spike: `rate_limit_event` carries real `seven_day` utilization with a reset time. **Acceptance criterion 6 is restated:** the meter shows the agent's real reported utilization, labelled with its window, and falls back to showing nothing (not to a locally-invented figure) for agents that report none.
+3. **The model list is queried, never hardcoded** — `list_models` at handshake replaces the Phase 1 fixture, which is stale by two model generations.
