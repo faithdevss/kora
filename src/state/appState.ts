@@ -76,9 +76,18 @@ export function modelOf(s: Session): Model {
   return models.find((m) => m.id === s.modelId) ?? models[0];
 }
 
-/** Universal commands plus whatever this session's agent adds, de-duplicated. */
+/**
+ * Universal commands plus whatever this session's agent adds, de-duplicated.
+ *
+ * Once a live agent has reported its real command list at handshake, that wins
+ * over the static fixture — so the palette, tab-complete and `/help` all agree
+ * with what the agent will actually accept.
+ */
 export function availCmds(s: Session): string[] {
-  return [...new Set([...COMMON, ...agentOf(s).extra])];
+  const fromAgent = s.agentCommands?.length
+    ? s.agentCommands.map((c) => c.c)
+    : agentOf(s).extra;
+  return [...new Set([...COMMON, ...fromAgent])];
 }
 
 export function sessionById(state: AppState, id: string): Session | undefined {
@@ -112,10 +121,14 @@ export function mkSession(agentId: string, accountId?: string): Session {
     ctxUsed: 1400,
     sessIn: 0,
     sessOut: 0,
+    cacheRead: 0,
     msgs: 0,
     history: [],
     suggested: false,
     lines: [{ key: nextLineKey(), t: 'banner' }],
+    // No process until the store spawns one; agents without a real adapter
+    // stay here permanently.
+    status: 'offline',
   };
 }
 
@@ -141,71 +154,17 @@ export function pushLine(state: AppState, id: string, line: NewLine): AppState {
   return updateSession(state, id, (s) => ({ ...s, lines: [...s.lines, withKey(line)] }));
 }
 
-/* ---------------- initial (Phase 1 seeded) state ---------------- */
+/* ---------------- initial state ---------------- */
 
 /**
- * Seeded two-session state matching the design mockup screenshot. Phase 3 loads
- * real persisted sessions here instead.
+ * A single empty Claude session. Phase 1's seeded fake transcript is gone —
+ * from Phase 2 on, every line in a session came from a real agent process.
+ * Phase 3 restores persisted sessions here instead.
  */
 export function initialState(): AppState {
   const s1 = mkSession('claude');
-  const s2 = mkSession('codex');
-
-  s1.lines = [
-    { key: nextLineKey(), t: 'banner' },
-    { key: nextLineKey(), t: 'cmd', text: 'why do my sessions never log out?' },
-    {
-      key: nextLineKey(),
-      t: 'resp',
-      text: 'Traced it to src/auth/session.ts:88 — the refresh timer is never cleared on logout, so tokens keep minting after sign-out. Cleanup below.',
-      block:
-        '  useEffect(() => {\n    const id = setInterval(refresh, 5*60_000)\n-   return\n+   return () => clearInterval(id)\n  }, [session.id])',
-      lang: 'diff',
-      tool: 'edited src/auth/session.ts · +1 −1',
-    },
-    { key: nextLineKey(), t: 'cmd', text: 'fix it and run the auth tests' },
-    {
-      key: nextLineKey(),
-      t: 'resp',
-      text: 'Applied the cleanup and re-ran the auth suite — 41 passed, 0 failed. Logout now revokes the timer and clears the refresh token.',
-      tool: 'bash · npm test src/auth — 41 passing',
-    },
-    {
-      key: nextLineKey(),
-      t: 'warn',
-      text: 'Context is at 76% of the 200k window. Older turns are inflating every request. Run /compact to summarize, or /clear to start fresh.',
-      chips: [
-        { label: '/compact', cmd: '/compact' },
-        { label: '/clear', cmd: '/clear' },
-      ],
-    },
-  ];
-  s1.ctxUsed = 152000;
-  s1.sessIn = 119000;
-  s1.sessOut = 33000;
-  s1.msgs = 6;
-  s1.suggested = true;
-
-  s2.lines = [
-    { key: nextLineKey(), t: 'banner' },
-    { key: nextLineKey(), t: 'cmd', text: 'add rate-limit headers to the gateway' },
-    {
-      key: nextLineKey(),
-      t: 'resp',
-      text: 'Done. Pulled the duplicated pagination into usePaginated() and updated all three call sites. Types check clean.',
-      block:
-        'export function usePaginated<T>(rows: T[], size = 20) {\n  const [page, setPage] = useState(0)\n  const slice = rows.slice(page*size, page*size+size)\n  return { page, setPage, slice }\n}',
-      lang: 'ts',
-      tool: 'created src/hooks/usePaginated.ts',
-    },
-  ];
-  s2.ctxUsed = 41000;
-  s2.sessIn = 32000;
-  s2.sessOut = 9000;
-  s2.msgs = 2;
-
   return {
-    sessions: [s1, s2],
+    sessions: [s1],
     focusedId: s1.id,
     splitOn: false,
     input: '',

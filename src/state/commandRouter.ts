@@ -19,8 +19,49 @@ import {
   updateSession,
 } from './appState';
 import { CMD_DESC, COMMON, ACCOUNTS, AGENTS } from './mockFixtures';
-import { CTX_CLEAR, CTX_WARN, compactTarget, fmt, fmtWin } from './format';
+import { CTX_CLEAR, CTX_WARN, fmtWin } from './format';
 import type { ListKind, PanelData, Session } from '../types/agent';
+
+/* ---------------- local vs passthrough ---------------- */
+
+/**
+ * Commands Kora owns, because they are about Kora's own UI and have no meaning
+ * to an agent CLI.
+ *
+ * Everything else — `/compact`, `/clear`, `/cost`, `/review`, `/init`,
+ * `/memory`, `/model`, `/diff`, `/tools`, `/mcp` — is forwarded to the running
+ * agent so the real CLI's behavior is what the user sees, rather than a
+ * reimplementation of it (master plan, "Passthrough over reimplementation").
+ */
+export const KORA_COMMANDS = [
+  '/help',
+  '/agents',
+  '/users',
+  '/accounts',
+  '/models',
+  '/usage',
+  '/statistics',
+  '/search',
+  '/split',
+  '/tab',
+  '/respawn',
+  '/stop',
+];
+
+/**
+ * Whether `raw` should be handled by Kora rather than sent to the agent.
+ *
+ * A session with no live process handles everything locally, so the user still
+ * gets a useful message (including "did you mean") instead of silence. Note the
+ * router no longer *implements* the agent's commands in that case — it says the
+ * agent owns them and isn't running.
+ */
+export function isLocalCommand(state: AppState, sessionId: string, raw: string): boolean {
+  const cmd = raw.trim().split(/\s+/)[0].toLowerCase();
+  if (KORA_COMMANDS.includes(cmd)) return true;
+  const session = sessionById(state, sessionId);
+  return !session || session.status === 'offline' || session.status === 'dead';
+}
 
 /* ---------------- fuzzy matching ---------------- */
 
@@ -71,6 +112,14 @@ function matchModel(s: Session, arg: string): string | undefined {
 
 /* ---------------- panel data ---------------- */
 
+/**
+ * Panel figures.
+ *
+ * Every number here is one the agent actually reported. Phase 1 filled the gaps
+ * with plausible arithmetic (a cache-read ratio, a per-token price); those are
+ * gone rather than sitting unlabelled next to real ones. What is genuinely
+ * unknown is `null`, and the panel renders it as "—".
+ */
 export function usageData(s: Session): PanelData {
   const a = acctOf(s);
   return {
@@ -80,13 +129,13 @@ export function usageData(s: Session): PanelData {
     sessIn: s.sessIn,
     sessOut: s.sessOut,
     msgs: s.msgs,
-    cacheRead: Math.round(s.sessIn * 0.42),
-    cost: (s.sessIn / 1e6) * 3 + (s.sessOut / 1e6) * 15,
+    cacheRead: s.cacheRead,
+    cost: s.costUsd ?? null,
     acctName: a?.name ?? '—',
     plan: a?.plan ?? '—',
-    wUsed: a?.wUsed ?? 0,
-    wLim: a?.wLim ?? 0,
-    unit: a?.unit ?? '',
+    // Real utilization when the agent reports one; otherwise nothing to show.
+    utilization: s.rateLimit?.utilization ?? null,
+    window: s.rateLimit?.window ?? null,
     model: modelOf(s).name,
   };
 }
@@ -204,11 +253,19 @@ export function pushList(state: AppState, id: string, kind: ListKind): AppState 
 function cmdHelp(state: AppState, id: string): AppState {
   const s = sessionById(state, id)!;
   const ag = agentOf(s);
+  // Once an agent is running it tells us its real command list at handshake,
+  // which beats the static fixture.
+  // The agent's own list comes with its own descriptions; fall back to the
+  // static table only for entries it did not describe.
+  const extra = s.agentCommands?.length
+    ? s.agentCommands.map((e) => ({ c: e.c, d: e.d || CMD_DESC[e.c] || '' }))
+    : ag.extra.map((c) => ({ c, d: CMD_DESC[c] ?? '' }));
+
   return pushLine(state, id, {
     t: 'help',
     agent: ag.name,
     common: COMMON.map((c) => ({ c, d: CMD_DESC[c] ?? '' })),
-    extra: ag.extra.map((c) => ({ c, d: CMD_DESC[c] ?? '' })),
+    extra,
   });
 }
 
@@ -337,42 +394,22 @@ export function runCommand(state: AppState, sessionId: string, raw: string): App
     case '/statistics':
       return pushLine(next, sessionId, { t: 'panel', kind: 'stats', data: statsData(s) });
 
-    case '/cost':
-      return pushLine(next, sessionId, { t: 'panel', kind: 'cost', data: usageData(s) });
-
-    case '/clear':
-      next = updateSession(next, sessionId, (sess) => ({
-        ...sess,
-        lines: [],
-        ctxUsed: 1400,
-        suggested: false,
-      }));
-      next = pushLine(next, sessionId, { t: 'banner' });
-      return pushLine(next, sessionId, {
-        t: 'ok',
-        text: `Context cleared — window reset to ${fmt(1400)} tokens (system + tools only).`,
-      });
-
-    case '/compact': {
-      const before = s.ctxUsed;
-      const target = compactTarget(s.ctxWin);
-      const after = Math.min(before, target);
-      const freed = Math.max(0, before - target);
-      next = updateSession(next, sessionId, (sess) => ({
-        ...sess,
-        ctxUsed: after,
-        suggested: false,
-      }));
-      return pushLine(next, sessionId, {
-        t: 'ok',
-        text:
-          `Compacted context — summarized earlier turns and freed ~${fmt(freed)} tokens. ` +
-          `Now at ${Math.round((after / s.ctxWin) * 100)}%.`,
-      });
-    }
-
     case '/search':
       return { ...next, searchOpen: true };
+
+    // /respawn and /stop are intercepted by the store, which owns the process.
+    // Reaching here means there was nothing to act on.
+    case '/respawn':
+      return pushLine(next, sessionId, {
+        t: 'dim',
+        text: 'Nothing to respawn — this session has no agent process.',
+      });
+
+    case '/stop':
+      return pushLine(next, sessionId, {
+        t: 'dim',
+        text: 'Nothing to stop — the agent is not generating.',
+      });
 
     case '/split':
       return toggleSplit(next);
@@ -380,54 +417,21 @@ export function runCommand(state: AppState, sessionId: string, raw: string): App
     case '/tab':
       return newTab(next);
 
-    case '/diff':
-      return pushLine(next, sessionId, {
-        t: 'resp',
-        text: 'Working tree — 2 files changed:',
-        block:
-          "diff --git a/src/gateway/limiter.ts b/src/gateway/limiter.ts\n@@ export function handler(req) {\n+  res.setHeader('X-RateLimit-Remaining', bucket.left)\n+  res.setHeader('X-RateLimit-Reset', bucket.reset)\n   return next()",
-        lang: 'diff',
-        tool: '2 files · +6 −0',
-      });
 
-    case '/tools':
-      return pushLine(next, sessionId, {
-        t: 'out',
-        text:
-          `Available tools for ${agentOf(s).name}:\n` +
-          '  • read_file        • write_file       • edit_file\n' +
-          '  • run_bash         • grep / glob      • web_search\n' +
-          `  • ${agentOf(s).extra[0] ?? '/help'} (agent-specific)`,
-      });
 
-    case '/memory':
-      return pushLine(next, sessionId, {
-        t: 'out',
-        text:
-          `# project memory · ${agentOf(s).name}\n` +
-          '  - api-gateway is a Fastify service, TypeScript strict\n' +
-          '  - never commit to main; open a PR\n' +
-          '  - run `npm test` before every commit',
-      });
 
-    case '/review':
-      return pushLine(next, sessionId, {
-        t: 'ok',
-        text: 'Reviewed staged changes — 0 blocking issues, 2 style nits. Looks safe to commit.',
-      });
 
-    case '/init':
-      return pushLine(next, sessionId, {
-        t: 'ok',
-        text: 'Scanned 214 files across 31 folders. Wrote memory + tool config. Ready.',
-      });
 
     default: {
-      const known = availCmds(s).includes(cmd);
-      if (known) {
+      // Reaching the router at all means no agent is running — a live session
+      // would have had this forwarded. Say so plainly rather than inventing a
+      // result, which is what Phase 1 used to do here.
+      if (availCmds(s).includes(cmd)) {
         return pushLine(next, sessionId, {
-          t: 'dim',
-          text: `${cmd} — ${CMD_DESC[cmd] ?? 'ok'}. (interactive stub in this preview)`,
+          t: 'err',
+          text: `${cmd} is handled by the agent, and no agent is running in this session.`,
+          action:
+            s.status === 'dead' ? { label: 'respawn agent', cmd: '/respawn' } : undefined,
         });
       }
       return pushLine(next, sessionId, {

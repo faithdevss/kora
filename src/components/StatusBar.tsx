@@ -9,8 +9,11 @@ interface Props {
 }
 
 /**
- * The WEEK meter shows Kora's own locally-tracked rolling usage, not authoritative
- * plan quota — see master plan, "Weekly quota is not a real number".
+ * The WEEK meter shows the agent's real reported utilization when it exposes one
+ * — Claude Code sends `rate_limit_event` every turn. It falls back to the
+ * account's recorded figure only for agents that report nothing. (The master
+ * plan's original "weekly quota is not a real number" note was amended after the
+ * Phase 2 spike.)
  */
 export function StatusBar({ session, onSuggest }: Props) {
   const agent = agentOf(session);
@@ -19,7 +22,18 @@ export function StatusBar({ session, onSuggest }: Props) {
 
   const cpct = session.ctxUsed / session.ctxWin;
   const tone = ctxTone(cpct);
-  const wpct = acct?.wLim ? acct.wUsed / acct.wLim : 0;
+
+  // Only what the agent actually reported. Until a rate_limit_event arrives
+  // there is nothing real to show, so it shows nothing — the Phase-1 mock
+  // account figures used to sit here and read as live data.
+  const live = session.rateLimit;
+  const wpct = live ? live.utilization : 0;
+  const weekText = live
+    ? `${Math.round(live.utilization * 100)}% ${live.window.replace('_', '-')}`
+    : '—';
+  const weekTitle = live
+    ? `Reported by ${agent.name}${live.resetsAt ? ` · resets ${new Date(live.resetsAt * 1000).toLocaleString()}` : ''}`
+    : `${agent.name} has not reported quota usage yet`;
 
   const suggestion =
     cpct >= CTX_WARN
@@ -33,6 +47,17 @@ export function StatusBar({ session, onSuggest }: Props) {
       <div className="k-status-left">
         <Dot color={agent.accent} size={8} />
         <span className="k-status-agent">{agent.name}</span>
+        <span className={`k-status-state is-${session.status}`} title={`agent ${session.status}`}>
+          {session.status === 'busy'
+            ? 'working'
+            : session.status === 'dead'
+              ? 'stopped'
+              : session.status === 'starting'
+                ? 'starting'
+                : session.status === 'offline'
+                  ? 'not connected'
+                  : 'ready'}
+        </span>
         <span className="k-status-account">{acct?.name ?? '—'}</span>
         <span className="k-status-sep">·</span>
         <span className="k-status-model">{model.name}</span>
@@ -53,12 +78,10 @@ export function StatusBar({ session, onSuggest }: Props) {
           <span className="k-tok-out">↓{fmt(session.sessOut)}</span>
         </div>
 
-        <div className="k-status-group" title="Usage Kora recorded locally — not plan quota">
+        <div className="k-status-group" title={weekTitle}>
           <span className="k-status-key">WEEK</span>
           <Bar pct={wpct} color={wpct >= 0.9 ? 'var(--red)' : 'var(--blue)'} width={56} />
-          <span className="k-status-week">
-            {acct ? `${acct.wUsed}/${acct.wLim} ${acct.unit}` : '—'}
-          </span>
+          <span className="k-status-week">{weekText}</span>
         </div>
 
         {suggestion ? (

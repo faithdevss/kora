@@ -9,7 +9,12 @@ import { usageData } from '../state/commandRouter';
 import type { Session, TranscriptLine } from '../types/agent';
 
 const agent = AGENTS[0];
-const actions = { runQuick: () => {}, pickItem: () => {}, fillInput: () => {} };
+const actions = {
+  runQuick: () => {},
+  pickItem: () => {},
+  fillInput: () => {},
+  answerPermission: () => {},
+};
 
 function withLines(lines: TranscriptLine[]): Session {
   return { ...focusedSession(initialState()), lines };
@@ -48,9 +53,16 @@ describe('transcript renderers', () => {
         common: [{ c: '/help', d: 'list every command' }],
         extra: [{ c: '/cost', d: 'estimated cost this session' }],
       },
+      {
+        key: '12b',
+        t: 'perm',
+        requestId: 'toolu_1',
+        tool: 'Edit',
+        detail: 'wants to write src/a.ts',
+        scope: 'session_edits',
+      },
       { key: '12', t: 'panel', kind: 'usage', data },
       { key: '13', t: 'panel', kind: 'stats', data: { ...data, avgIn: 10, avgOut: 20 } },
-      { key: '14', t: 'panel', kind: 'cost', data },
     ];
 
     const { container } = renderLines(lines);

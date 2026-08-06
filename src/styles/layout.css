@@ -554,3 +554,41 @@
 .k-search-close:hover {
   color: var(--text-bright);
 }
+
+/* ---------- agent status pill (Phase 2) ---------- */
+
+.k-status-state {
+  font-size: 9.5px;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex: none;
+  border: 1px solid transparent;
+}
+
+.k-status-state.is-idle {
+  color: var(--green);
+  border-color: #2a4436;
+}
+
+.k-status-state.is-busy {
+  color: var(--amber);
+  border-color: #4a3a1c;
+  animation: kpulse 1.6s infinite;
+}
+
+.k-status-state.is-starting {
+  color: var(--dim);
+  border-color: var(--border);
+}
+
+.k-status-state.is-dead {
+  color: var(--red);
+  border-color: #4a1c1c;
+}
+
+.k-status-state.is-offline {
+  color: var(--dim2);
+  border-color: var(--border);
+}

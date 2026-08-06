@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default-deny baseline. Phase 1 grants the webview nothing beyond core window access; every later phase must add its commands here explicitly (see master plan, Security #2).",
+  "description": "Default-deny baseline for Tauri core and plugin permissions: nothing beyond core window access is granted, so the webview has no filesystem, shell, HTTP or clipboard capability. Note this file does NOT gate Kora's own #[tauri::command] functions — those are allowlisted by generate_handler! in lib.rs, which is the list to audit alongside this one (master plan, Security #2).",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render } from '@testing-library/react';
 import { Pane, type PaneActions } from './Pane';
 import { AGENTS } from '../state/mockFixtures';
-import { initialState, sessionById } from '../state/appState';
+import { initialState, mkSession, sessionById } from '../state/appState';
 import type { Session, TranscriptLine } from '../types/agent';
 
-const state = initialState();
+/** Claude + Codex, so split-pane behaviour has two different agents to show. */
+const base = initialState();
+const state = { ...base, sessions: [base.sessions[0], mkSession('codex')] };
 
 const blankInput = {
   focusToken: 'tok',
@@ -38,7 +40,12 @@ function mkPane(session: Session, focused: boolean, actions: PaneActions, glow =
 }
 
 function noopActions(): PaneActions {
-  return { runQuick: vi.fn(), pickItem: vi.fn(), fillInput: vi.fn() };
+  return {
+    runQuick: vi.fn(),
+    pickItem: vi.fn(),
+    fillInput: vi.fn(),
+    answerPermission: vi.fn(),
+  };
 }
 
 describe('pane accent', () => {

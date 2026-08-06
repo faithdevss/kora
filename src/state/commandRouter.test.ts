@@ -4,7 +4,9 @@ import {
   agentOf,
   focusedSession,
   initialState,
+  mkSession,
   modelOf,
+  nextLineKey,
   sessionById,
   type AppState,
 } from './appState';
@@ -23,6 +25,29 @@ import type { TranscriptLine } from '../types/agent';
 
 let state: AppState;
 
+/**
+ * Two sessions with a used-up context, so the routing tests have something to
+ * act on. Phase 2 made `initialState()` a single empty session, since real
+ * transcripts now come from a real agent.
+ */
+function seeded(): AppState {
+  const base = initialState();
+  const claude = {
+    ...base.sessions[0],
+    ctxUsed: 152000,
+    sessIn: 119000,
+    sessOut: 33000,
+    msgs: 6,
+    suggested: true,
+    lines: [
+      base.sessions[0].lines[0],
+      { key: nextLineKey(), t: 'cmd' as const, text: 'why do my sessions never log out?' },
+    ],
+  };
+  const codex = { ...mkSession('codex'), ctxUsed: 41000, sessIn: 32000, sessOut: 9000, msgs: 2 };
+  return { ...base, sessions: [claude, codex], focusedId: claude.id };
+}
+
 function run(cmd: string, s: AppState = state): AppState {
   return runCommand(s, s.focusedId, cmd);
 }
@@ -34,7 +59,7 @@ function lastLine(s: AppState): TranscriptLine {
 
 beforeEach(() => {
   __resetIds();
-  state = initialState();
+  state = seeded();
 });
 
 describe('line echo', () => {
@@ -57,7 +82,6 @@ describe('command coverage', () => {
   const panels: Array<[string, string]> = [
     ['/usage', 'usage'],
     ['/statistics', 'stats'],
-    ['/cost', 'cost'],
   ];
   it.each(panels)('%s renders a %s panel', (cmd, kind) => {
     expect(lastLine(run(cmd))).toMatchObject({ t: 'panel', kind });
@@ -83,67 +107,52 @@ describe('command coverage', () => {
     expect(line.common.every((e) => e.d.length > 0)).toBe(true);
   });
 
-  it('/tools, /memory print agent-scoped output', () => {
-    expect(lastLine(run('/tools'))).toMatchObject({ t: 'out' });
-    if (lastLine(run('/tools')).t === 'out') {
-      const l = lastLine(run('/tools'));
-      expect('text' in l && l.text.includes('Claude Code')).toBe(true);
-    }
-    expect(lastLine(run('/memory'))).toMatchObject({ t: 'out' });
+  // Commands the agent owns are never answered locally. Reaching the router
+  // means no process is running, and Phase 2 removed the Phase 1 fakes that
+  // used to invent plausible-looking output here.
+  // Claude Code's own set: the universal /compact and /clear, plus what this
+  // agent declares. (/tools and /diff belong to other agents, so under Claude
+  // they are correctly unknown rather than agent-owned.)
+  const agentOwned = ['/compact', '/clear', '/memory', '/review', '/init', '/cost'];
+  it.each(agentOwned)('%s says the agent owns it rather than faking a result', (cmd) => {
+    const line = lastLine(run(cmd));
+    expect(line).toMatchObject({ t: 'err' });
+    if (line.t !== 'err') throw new Error('expected err');
+    expect(line.text).toContain('handled by the agent');
   });
 
-  it('/review and /init report success', () => {
-    expect(lastLine(run('/review'))).toMatchObject({ t: 'ok' });
-    expect(lastLine(run('/init'))).toMatchObject({ t: 'ok' });
-  });
-
-  it('/diff renders a diff-highlighted response block', () => {
-    expect(lastLine(run('/diff'))).toMatchObject({ t: 'resp', lang: 'diff' });
-  });
-
-  it('stubs commands the agent declares but that are not implemented', () => {
+  it('does not invent a result for an agent command it merely knows the name of', () => {
     let s = run('/agents codex');
     s = run('/approvals', s);
-    expect(lastLine(s)).toMatchObject({ t: 'dim' });
-  });
-});
-
-describe('context commands', () => {
-  it('/clear resets the transcript to a banner and the window to 1.4k', () => {
-    const next = run('/clear');
-    const sess = focusedSession(next);
-    expect(sess.ctxUsed).toBe(1400);
-    expect(sess.suggested).toBe(false);
-    expect(sess.lines[0]).toMatchObject({ t: 'banner' });
-    // the echoed /clear is wiped along with the rest of the scrollback
-    expect(sess.lines).toHaveLength(2); // banner + ok
-    expect(sess.lines[1]).toMatchObject({ t: 'ok' });
+    const line = lastLine(s);
+    expect(line).toMatchObject({ t: 'err' });
+    if (line.t !== 'err') throw new Error('expected err');
+    expect(line.text).toContain('no agent is running');
   });
 
-  it('/compact shrinks the context to 28% of the window and reports what it freed', () => {
-    const next = run('/compact');
-    const sess = focusedSession(next);
-    expect(sess.ctxUsed).toBe(56000); // 28% of 200k
-    const line = lastLine(next);
-    if (line.t !== 'ok') throw new Error('expected ok');
-    expect(line.text).toContain('96k');
-    expect(line.text).toContain('28%');
-  });
-
-  it('/compact never inflates a context that is already small', () => {
-    let s = run('/clear');
-    s = run('/compact', s);
-    expect(focusedSession(s).ctxUsed).toBe(1400);
+  it('offers a respawn when the session had an agent that died', () => {
+    const dead = {
+      ...state,
+      sessions: state.sessions.map((x) =>
+        x.id === state.focusedId ? { ...x, status: 'dead' as const } : x,
+      ),
+    };
+    expect(lastLine(run('/compact', dead))).toMatchObject({
+      t: 'err',
+      action: { cmd: '/respawn' },
+    });
   });
 });
 
 describe('checkContext', () => {
   it('warns once when crossing 72% and re-arms below 60%', () => {
-    let s = run('/clear');
+    let s = state;
     const id = s.focusedId;
     s = {
       ...s,
-      sessions: s.sessions.map((x) => (x.id === id ? { ...x, ctxUsed: 150000 } : x)),
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, ctxUsed: 150000, suggested: false } : x,
+      ),
     };
     s = checkContext(s, id);
     expect(lastLine(s)).toMatchObject({ t: 'warn' });
@@ -159,9 +168,12 @@ describe('checkContext', () => {
   });
 
   it('warn chips carry runnable /compact and /clear commands', () => {
-    let s = run('/clear');
+    let s = state;
     const id = s.focusedId;
-    s = { ...s, sessions: s.sessions.map((x) => (x.id === id ? { ...x, ctxUsed: 150000 } : x)) };
+    s = {
+      ...s,
+      sessions: s.sessions.map((x) => (x.id === id ? { ...x, ctxUsed: 150000, suggested: false } : x)),
+    };
     const line = lastLine(checkContext(s, id));
     if (line.t !== 'warn') throw new Error('expected warn');
     expect(line.chips.map((c) => c.cmd)).toEqual(['/compact', '/clear']);
@@ -292,9 +304,9 @@ describe('tabs and panes', () => {
 
   it('commands route to the session they were issued in, not the focused one', () => {
     const other = state.sessions[1].id;
-    const s = runCommand(state, other, '/clear');
-    expect(sessionById(s, other)!.ctxUsed).toBe(1400);
-    expect(focusedSession(s).ctxUsed).toBe(152000);
+    const s = runCommand(state, other, '/usage');
+    expect(sessionById(s, other)!.lines.at(-1)).toMatchObject({ t: 'panel' });
+    expect(focusedSession(s).lines.at(-1)).not.toMatchObject({ t: 'panel' });
   });
 });
 
@@ -305,11 +317,27 @@ describe('/search', () => {
 });
 
 describe('usageData', () => {
-  it('derives cost and cache figures from session tokens', () => {
+  it('reports only figures the agent actually gave us', () => {
     const d = usageData(focusedSession(state));
     expect(d.ctxPct).toBeCloseTo(0.76, 2);
-    expect(d.cacheRead).toBe(Math.round(119000 * 0.42));
-    expect(d.cost).toBeCloseTo((119000 / 1e6) * 3 + (33000 / 1e6) * 15, 6);
+    // Nothing was reported for these, so they are absent rather than invented.
+    expect(d.cost).toBeNull();
+    expect(d.utilization).toBeNull();
+    expect(d.cacheRead).toBe(0);
     expect(d.acctName).toBe('personal');
+  });
+
+  it('passes through real cost and quota once the agent reports them', () => {
+    const s = {
+      ...focusedSession(state),
+      costUsd: 0.42,
+      cacheRead: 1234,
+      rateLimit: { window: 'seven_day', utilization: 0.9, resetsAt: null },
+    };
+    const d = usageData(s);
+    expect(d.cost).toBe(0.42);
+    expect(d.cacheRead).toBe(1234);
+    expect(d.utilization).toBe(0.9);
+    expect(d.window).toBe('seven_day');
   });
 });

@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
-import type { Attachment, ListKind, Session } from '../types/agent';
+import type { Attachment, ListKind, PermissionDecision, Session } from '../types/agent';
 import { agentOf } from '../state/appState';
 import { Transcript, type TranscriptActions } from './transcript/Transcript';
 import { CommandInput } from './CommandInput';
@@ -10,6 +10,11 @@ export interface PaneActions {
   runQuick: (sessionId: string, cmd: string) => void;
   pickItem: (sessionId: string, kind: ListKind, itemId: string) => void;
   fillInput: (cmd: string) => void;
+  answerPermission: (
+    sessionId: string,
+    requestId: string,
+    decision: PermissionDecision,
+  ) => void;
 }
 
 interface Props {
@@ -56,6 +61,8 @@ export function Pane({ session, focused, glow, query, actions, onFocus, input }:
       runQuick: (cmd) => actions.runQuick(session.id, cmd),
       pickItem: (kind, itemId) => actions.pickItem(session.id, kind, itemId),
       fillInput: actions.fillInput,
+      answerPermission: (requestId, decision) =>
+        actions.answerPermission(session.id, requestId, decision),
     }),
     [actions, session.id],
   );
