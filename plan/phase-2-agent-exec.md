@@ -13,6 +13,13 @@ Replace Phase 1's mock `resp` generator with a real, running Claude Code CLI pro
   - *Interactive PTY mode:* `claude` interactive is a full-screen TUI (Ink-based) that redraws via ANSI cursor movement, not a line-by-line stream. Segmenting that into transcript lines is brittle. Native slash commands (`/compact`, `/clear`, `/model`) work as the user knows them.
   - *Structured mode:* `claude -p --output-format stream-json --input-format stream-json` emits clean JSON events with real token/usage metadata (exactly what Phases 3–4 need), and `--resume <session-id>` provides session continuity. But slash-command passthrough and TUI-native behaviors differ from interactive mode.
   Prototype both against the installed CLI, pick one (or a hybrid), and **record the decision + rationale in this file** before building the parser, since Phase 3 (token counts) and Phase 4 (context/`/compact` parsing) both depend on which fork wins.
+
+  > **DECISION (recorded 2026-08-06, spiked against `claude` 2.1.223) — structured mode wins outright.** See "Spike Results" at the bottom of this file for the evidence. Every doubt the fork description raises about structured mode turned out to be false: slash commands pass through, the process persists across turns, and output streams token-by-token. Interactive PTY mode was not prototyped further once the structured path cleared every requirement, because it is strictly worse on all of them and adds an ANSI-parsing burden.
+  >
+  > **Consequences that override statements elsewhere in this file:**
+  > - **No PTY.** Structured mode is plain stdin/stdout pipes, so `portable-pty` is not a dependency and there are no ANSI escapes to strip. `src-tauri/src/pty/` is therefore built as `src-tauri/src/proc/` — same role, honest name.
+  > - **The parser consumes JSON events**, not text segmentation.
+  > - **Permission approval is routed into Kora's UI** via the CLI's control protocol (see below), rather than auto-accepting. This adds a `perm` transcript line type — the one addition to Phase 1's line-type set.
 - Rust PTY process management using `portable-pty` (evaluate Tauri's official pty/shell plugin first if one exists and covers streaming I/O + resize + kill cleanly; fall back to `portable-pty` directly if not).
 - Spawn the user's installed `claude` CLI binary (assume it's on `$PATH`; detect-and-error clearly if missing — no auto-install).
 - Bridge: Rust reads PTY output continuously and emits Tauri events (e.g. `agent://output` with `{ session_id, chunk }`) to the frontend; frontend writes user input via a Tauri command (e.g. `agent_write(session_id, text)`).
@@ -72,3 +79,47 @@ src/
 6. Killing the `claude` process externally (e.g. `kill -9` in a terminal) while a Kora session is open surfaces a respawn prompt in that pane within a few seconds, and clicking it produces a working session again — with the prior conversation restored via `--continue`/`--resume` (verify by asking a follow-up question that requires earlier context), falling back to a clearly-labeled fresh session only if resume fails.
 7. Opening a workspace containing a `CLAUDE.md` or `.mcp.json` shows an informational note in the session banner; opening one without either shows no such note.
 8. Running `/compact`, `/clear`, `/cost` in a real session visibly invokes the real Claude Code CLI behavior (observable via its actual output), not a Kora-side reimplementation.
+
+---
+
+## Spike Results — output-mode decision
+
+Run against `claude` 2.1.223 (macOS, `~/.local/bin/claude`) on 2026-08-06. Raw transcripts were captured to a scratch dir; the findings below are what drove the decision.
+
+### What was tested
+
+| # | Question | Result |
+|---|---|---|
+| 1 | Does `-p --output-format stream-json` emit usable events? | Yes. `system/init`, `assistant`, `user` (tool results), `system/*` status events, `rate_limit_event`, `result`. |
+| 2 | Can one process serve many turns? | Yes. `--input-format stream-json` keeps the process alive; three turns ran over one process with one `session_id`, and turn 2 recalled turn 1's content. Process exits 0 when stdin closes. |
+| 3 | Do slash commands pass through? | **Yes** — the doubt in the fork description was wrong. `/cost` and `/compact` both executed the real CLI behavior and returned real output. `/cost` reported `num_turns: 0` and no cost delta, confirming the CLI handles them locally without an API round-trip. |
+| 4 | Is output actually streaming, or batched per turn? | Streaming. `--include-partial-messages` produces `stream_event` / `content_block_delta` frames (31 deltas in one short turn), plus `content_block_start` naming each block's type and, for tools, the tool name. |
+| 5 | Is real usage metadata available? | Yes, and richer than Phase 3 needs: `result.usage` (input/output/cache-creation/cache-read), `result.total_cost_usd`, and `result.modelUsage[model].contextWindow` — the real context window, which Phase 4 needs. |
+| 6 | What happens when a tool needs permission? | With no handshake: the tool is **denied**, surfacing `system/permission_denied` plus `result.permission_denials[]`. There is no interactive approval path by default. |
+| 7 | Can permission approval be routed to Kora? | **Yes.** The CLI implements the control protocol on stdin. Sending `{"type":"control_request","request_id":…,"request":{"subtype":"initialize","hooks":{}}}` returns a `control_response` carrying the full slash-command list with descriptions. `{"subtype":"set_permission_mode","mode":"acceptEdits"}` takes effect immediately and is echoed as a `system/status` event. The binary also implements `can_use_tool`, `interrupt`, and `hook_callback` request subtypes. |
+
+### Why structured mode, concretely
+
+- It is the only mode that satisfies acceptance criterion 1 (live streaming) **and** criterion 8 (real CLI slash-command behavior) at the same time. The fork description assumed these traded off against each other; they do not.
+- Phases 3 and 4 get their data for free and exactly, rather than by scraping a redrawing TUI: real token counts, real cost, real context window, real compaction boundaries (`system/compact_boundary` fires on `/compact`).
+- Session continuity is first-class: `--session-id <uuid>` lets Kora *choose* the id at spawn, so crash recovery uses `--resume <that id>` with no id-capture race. Interactive mode would require scraping the id out of TUI output.
+- Interactive mode's only advantage was native slash commands, and structured mode has those too.
+
+### Resulting architecture
+
+```
+claude -p --input-format stream-json --output-format stream-json \
+       --verbose --include-partial-messages --replay-user-messages \
+       --session-id <uuid-kora-generated> [--resume <uuid> on respawn] \
+       --model <model-id>
+```
+
+- **Handshake:** on spawn Kora sends `control_request/initialize`, which both advertises `can_use_tool` support and returns the agent's real slash-command list (used to populate `/help` and the palette per agent, replacing Phase 1's static `CMD_DESC` for connected agents).
+- **Permissions:** the session runs in the CLI's default (deny) mode. A `can_use_tool` control request renders a `perm` line with approve / approve-for-session / deny actions; the reply goes back as a `control_response`. Nothing executes without a click.
+- **Interrupt:** `control_request/interrupt` backs a stop action mid-generation.
+- **Crash recovery:** the spawn uuid is stored on the session, so respawn is `--resume <uuid>` in the same cwd, with a fresh spawn as the clearly-labeled fallback.
+
+### Corrections to earlier plan documents
+
+1. **`00-master-plan.md` → "Weekly quota is not a real number" is wrong** and is amended there. `rate_limit_event` carries `{rateLimitType: "seven_day", utilization, resetsAt, status}` on every turn, and `/cost` prints real session and weekly percentages. The WEEK meter shows real utilization with its real reset time.
+2. **`portable-pty` is not used.** Structured mode needs no terminal emulation. This also removes the ANSI-stripping requirement that the in-scope list attached to the interactive fork.
