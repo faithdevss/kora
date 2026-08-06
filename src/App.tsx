@@ -1,5 +1,5 @@
-import { useMemo, useSyncExternalStore } from 'react';
-import { store as defaultStore, type SessionStore } from './state/sessionStore';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
+import { store as defaultStore, lineText, type SessionStore } from './state/sessionStore';
 import { agentOf, availCmds, focusedSession, sessionById } from './state/appState';
 import { paneIds } from './state/commandRouter';
 import { TitleBar } from './components/TitleBar';
@@ -10,16 +10,16 @@ import { Pane, type PaneActions } from './components/Pane';
 import { SearchOverlay } from './components/SearchOverlay';
 import { paletteMatches } from './components/CommandPalette';
 import { countMatches } from './components/Highlight';
-import type { TranscriptLine } from './types/agent';
-
-/** Text a line contributes to scrollback search. */
-function lineText(l: TranscriptLine): string {
-  return 'text' in l && typeof l.text === 'string' ? l.text : '';
-}
 
 /** `store` is injectable so tests get a fresh one instead of the app singleton. */
 export default function App({ store = defaultStore }: { store?: SessionStore }) {
   const state = useSyncExternalStore(store.subscribe, store.getState);
+
+  // Connects to the backend and starts the first agent. The store guards
+  // against double-starting, which StrictMode's double-mount would otherwise do.
+  useEffect(() => {
+    void store.start();
+  }, [store]);
   const focused = focusedSession(state);
   const accent = agentOf(focused).accent;
 
@@ -28,6 +28,8 @@ export default function App({ store = defaultStore }: { store?: SessionStore }) 
       runQuick: (sessionId, cmd) => store.runQuick(cmd, sessionId),
       pickItem: (sessionId, kind, itemId) => store.pickItem(kind, itemId, sessionId),
       fillInput: store.fillInput,
+      answerPermission: (sessionId, requestId, decision) =>
+        void store.answerPermission(sessionId, requestId, decision),
     }),
     [store],
   );

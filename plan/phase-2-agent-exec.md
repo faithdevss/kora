@@ -19,7 +19,7 @@ Replace Phase 1's mock `resp` generator with a real, running Claude Code CLI pro
   > **Consequences that override statements elsewhere in this file:**
   > - **No PTY.** Structured mode is plain stdin/stdout pipes, so `portable-pty` is not a dependency and there are no ANSI escapes to strip. `src-tauri/src/pty/` is therefore built as `src-tauri/src/proc/` — same role, honest name.
   > - **The parser consumes JSON events**, not text segmentation.
-  > - **Permission approval is routed into Kora's UI** via the CLI's control protocol (see below), rather than auto-accepting. This adds a `perm` transcript line type — the one addition to Phase 1's line-type set.
+  > - **Permission approval is surfaced in Kora's UI** rather than auto-accepted, using the CLI's `set_permission_mode` control request. This adds a `perm` transcript line type — the one addition to Phase 1's line-type set. Note the CLI offers no per-call gate; see finding 7 below for exactly what it does and does not support.
 - Rust PTY process management using `portable-pty` (evaluate Tauri's official pty/shell plugin first if one exists and covers streaming I/O + resize + kill cleanly; fall back to `portable-pty` directly if not).
 - Spawn the user's installed `claude` CLI binary (assume it's on `$PATH`; detect-and-error clearly if missing — no auto-install).
 - Bridge: Rust reads PTY output continuously and emits Tauri events (e.g. `agent://output` with `{ session_id, chunk }`) to the frontend; frontend writes user input via a Tauri command (e.g. `agent_write(session_id, text)`).
@@ -96,7 +96,7 @@ Run against `claude` 2.1.223 (macOS, `~/.local/bin/claude`) on 2026-08-06. Raw t
 | 4 | Is output actually streaming, or batched per turn? | Streaming. `--include-partial-messages` produces `stream_event` / `content_block_delta` frames (31 deltas in one short turn), plus `content_block_start` naming each block's type and, for tools, the tool name. |
 | 5 | Is real usage metadata available? | Yes, and richer than Phase 3 needs: `result.usage` (input/output/cache-creation/cache-read), `result.total_cost_usd`, and `result.modelUsage[model].contextWindow` — the real context window, which Phase 4 needs. |
 | 6 | What happens when a tool needs permission? | With no handshake: the tool is **denied**, surfacing `system/permission_denied` plus `result.permission_denials[]`. There is no interactive approval path by default. |
-| 7 | Can permission approval be routed to Kora? | **Yes.** The CLI implements the control protocol on stdin. Sending `{"type":"control_request","request_id":…,"request":{"subtype":"initialize","hooks":{}}}` returns a `control_response` carrying the full slash-command list with descriptions. `{"subtype":"set_permission_mode","mode":"acceptEdits"}` takes effect immediately and is echoed as a `system/status` event. The binary also implements `can_use_tool`, `interrupt`, and `hook_callback` request subtypes. |
+| 7 | Can Kora influence permissions at all? | **Partly — and less than first assumed.** The CLI does implement the control protocol on stdin: `control_request/initialize` returns a `control_response` carrying the full slash-command list with descriptions, and `set_permission_mode` takes effect immediately (echoed as a `system/status` event). **But the CLI never *asks*.** Re-tested afterwards under `--permission-mode default` and `--permission-mode manual`, with and without the initialize handshake: in every case a blocked tool produced `system/permission_denied` and the turn continued. The `can_use_tool` strings in the binary belong to its bundled SDK acting as a *client* to a subprocess, not to the CLI acting as one. So there is no pre-execution gate to hook. |
 
 ### Why structured mode, concretely
 
@@ -115,7 +115,7 @@ claude -p --input-format stream-json --output-format stream-json \
 ```
 
 - **Handshake:** on spawn Kora sends `control_request/initialize`, which both advertises `can_use_tool` support and returns the agent's real slash-command list (used to populate `/help` and the palette per agent, replacing Phase 1's static `CMD_DESC` for connected agents).
-- **Permissions:** the session runs in the CLI's default (deny) mode. A `can_use_tool` control request renders a `perm` line with approve / approve-for-session / deny actions; the reply goes back as a `control_response`. Nothing executes without a click.
+- **Permissions:** the session runs in the CLI's default (deny) mode, so no tool runs unapproved — but the flow is **attempt → deny → approve → retry**, not a pre-execution gate, because the CLI refuses and reports rather than waiting for an answer. A `system/permission_denied` renders a `perm` line; approving sends `set_permission_mode` (`acceptEdits` for file edits, `bypassPermissions` for anything broader) plus a retry turn. The approve button states the real scope, since every grant is session-wide — Kora cannot offer a one-call approval the CLI does not support. Revisit if a future CLI exposes `--permission-prompt-tool` or emits `can_use_tool` to its own stdout.
 - **Interrupt:** `control_request/interrupt` backs a stop action mid-generation.
 - **Crash recovery:** the spawn uuid is stored on the session, so respawn is `--resume <uuid>` in the same cwd, with a fresh spawn as the clearly-labeled fallback.
 

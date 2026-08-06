@@ -53,7 +53,20 @@ export type LineType =
   | 'warn'
   | 'list'
   | 'help'
-  | 'panel';
+  | 'panel'
+  /** Added in Phase 2: the agent is asking to use a tool. */
+  | 'perm';
+
+/** How the user answered a tool-permission request. */
+export type PermissionDecision = 'allow' | 'deny';
+
+/**
+ * What approving a permission actually grants.
+ *
+ * Agents differ in how narrowly they can grant, so the UI labels the approve
+ * button from this rather than promising something the agent cannot deliver.
+ */
+export type PermissionScope = 'once' | 'session_edits' | 'session_all';
 
 export interface QuickChip {
   label: string;
@@ -78,7 +91,8 @@ export interface HelpEntry {
   d: string;
 }
 
-export type PanelKind = 'usage' | 'stats' | 'cost';
+/** `cost` is deliberately absent: `/cost` is the agent's own command. */
+export type PanelKind = 'usage' | 'stats';
 
 export interface PanelData {
   ctxUsed: number;
@@ -88,12 +102,14 @@ export interface PanelData {
   sessOut: number;
   msgs: number;
   cacheRead: number;
-  cost: number;
+  /** Real cost reported by the agent; `null` when it reports none. */
+  cost: number | null;
   acctName: string;
   plan: string;
-  wUsed: number;
-  wLim: number;
-  unit: string;
+  /** Real quota utilization 0–1, or `null` when the agent exposes none. */
+  utilization: number | null;
+  /** Which window the utilization covers, e.g. "seven_day". */
+  window: string | null;
   model: string;
   avgIn?: number;
   avgOut?: number;
@@ -119,6 +135,10 @@ export interface RespLine extends LineBase {
   block?: string;
   lang?: string;
   tool?: string;
+  /** Tool calls made while producing this response. */
+  tools?: string[];
+  /** True while text is still streaming in, so the UI can show a caret. */
+  streaming?: boolean;
 }
 export interface OutLine extends LineBase {
   t: 'out';
@@ -137,6 +157,8 @@ export interface ErrLine extends LineBase {
   text: string;
   /** "did you mean" suggestion. */
   hint?: string | null;
+  /** A one-click recovery, e.g. respawning a crashed agent. */
+  action?: { label: string; cmd: string };
 }
 export interface ThinkLine extends LineBase {
   t: 'think';
@@ -165,6 +187,17 @@ export interface PanelLine extends LineBase {
   kind: PanelKind;
   data: PanelData;
 }
+export interface PermLine extends LineBase {
+  t: 'perm';
+  /** The agent's id for the tool call being asked about. */
+  requestId: string;
+  tool: string;
+  detail: string;
+  /** What approving would cover. */
+  scope: PermissionScope;
+  /** Set once answered, which freezes the chips into a record of the answer. */
+  resolved?: PermissionDecision;
+}
 
 export type TranscriptLine =
   | BannerLine
@@ -178,7 +211,8 @@ export type TranscriptLine =
   | WarnLine
   | ListLine
   | HelpLine
-  | PanelLine;
+  | PanelLine
+  | PermLine;
 
 /** A line before it gets its React key — what command handlers construct. */
 export type NewLine =
@@ -193,7 +227,8 @@ export type NewLine =
   | Omit<WarnLine, 'key'>
   | Omit<ListLine, 'key'>
   | Omit<HelpLine, 'key'>
-  | Omit<PanelLine, 'key'>;
+  | Omit<PanelLine, 'key'>
+  | Omit<PermLine, 'key'>;
 
 /* ---------------- session ---------------- */
 
@@ -202,7 +237,36 @@ export interface Attachment {
   name: string;
 }
 
-/** One tab. In Phase 2 this gains a live PTY handle; the shape here stays. */
+/** Whether a session's agent process is up, and what it is doing. */
+export type SessionStatus =
+  /** No process, and none attempted (agent has no real adapter). */
+  | 'offline'
+  /** Spawn in flight. */
+  | 'starting'
+  /** Process up, waiting for input. */
+  | 'idle'
+  /** Process up, generating. */
+  | 'busy'
+  /** Process died unexpectedly; a respawn is offered. */
+  | 'dead';
+
+/** Config the wrapped CLI picks up from the workspace on its own. */
+export interface WorkspaceInfo {
+  /** Ready-to-print labels for config files found, supplied by the adapter. */
+  labels: string[];
+  mcpServers: number;
+}
+
+/** Rolling quota the agent reports, when it exposes one. */
+export interface RateLimit {
+  window: string;
+  /** 0–1. */
+  utilization: number;
+  /** Unix seconds. */
+  resetsAt: number | null;
+}
+
+/** One tab, and the agent process behind it. */
 export interface Session {
   id: string;
   /** Display-only process id. Phase 2 replaces this with the real pid. */
@@ -215,11 +279,31 @@ export interface Session {
   ctxUsed: number;
   sessIn: number;
   sessOut: number;
+  /** Cache-read tokens the agent reported, accumulated. */
+  cacheRead: number;
   msgs: number;
   history: string[];
   /** True once the context warning has fired, so it fires only once per climb. */
   suggested: boolean;
   lines: TranscriptLine[];
+
+  /* ---- Phase 2: the live process behind this tab ---- */
+
+  status: SessionStatus;
+  /** The agent's own conversation id, used to resume after a crash. */
+  agentUuid?: string;
+  /** Directory the agent process runs in. */
+  cwd?: string;
+  /** Key of the `resp` line currently being streamed into, if any. */
+  streamKey?: string;
+  /** Config the wrapped CLI inherited from the workspace. */
+  workspace?: WorkspaceInfo;
+  /** Real cumulative cost reported by the agent, in USD. */
+  costUsd?: number;
+  /** Real quota utilization reported by the agent. */
+  rateLimit?: RateLimit;
+  /** Slash commands the agent itself provides, learned at handshake. */
+  agentCommands?: HelpEntry[];
 }
 
 export type Density = 'comfortable' | 'compact';

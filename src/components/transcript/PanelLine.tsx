@@ -63,9 +63,13 @@ function Meter({
   );
 }
 
+/** Money, or "—" when the agent did not report any. */
+function money(v: number | null, digits = 2): string {
+  return v === null ? '—' : `$${v.toFixed(digits)}`;
+}
+
 function UsageCards({ d, onCompact }: { d: PanelData; onCompact: () => void }) {
   const tone = ctxTone(d.ctxPct);
-  const wpct = d.wLim ? d.wUsed / d.wLim : 0;
   return (
     <>
       <Card title="CONTEXT WINDOW" wide>
@@ -90,14 +94,17 @@ function UsageCards({ d, onCompact }: { d: PanelData; onCompact: () => void }) {
         <Row label="cache read" value={`${fmt(d.cacheRead)} tok`} tone="var(--dim)" />
         <Row label="messages" value={d.msgs} />
       </Card>
-      <Card title={`TRACKED USAGE · ${d.acctName}`} wide>
-        <Meter
-          label={d.plan}
-          current={`${d.wUsed} ${d.unit}`}
-          max={`${d.wLim} ${d.unit}`}
-          pct={wpct}
-          color={wpct >= 0.9 ? 'var(--red)' : 'var(--blue)'}
-        />
+      <Card title={`QUOTA · ${d.acctName}`} wide>
+        {d.utilization === null ? (
+          <div className="k-card-healthy">this agent reports no quota</div>
+        ) : (
+          <Meter
+            label={(d.window ?? '').replace('_', '-')}
+            current={`${Math.round(d.utilization * 100)}% used`}
+            pct={d.utilization}
+            color={d.utilization >= 0.9 ? 'var(--red)' : 'var(--blue)'}
+          />
+        )}
         <Row label="plan" value={d.plan} tone="var(--dim)" />
       </Card>
     </>
@@ -118,10 +125,10 @@ function StatsCards({ d }: { d: PanelData }) {
         <Row label="total tokens" value={fmt(d.sessIn + d.sessOut)} />
       </Card>
       <Card title="COST">
-        <Row label="this session" value={`$${d.cost.toFixed(2)}`} tone="var(--green)" />
+        <Row label="this session" value={money(d.cost)} tone="var(--green)" />
         <Row
           label="per message"
-          value={`$${(d.msgs ? d.cost / d.msgs : 0).toFixed(3)}`}
+          value={d.cost !== null && d.msgs ? money(d.cost / d.msgs, 3) : '—'}
           tone="var(--dim)"
         />
         <Row label="billed to" value={d.acctName} tone="var(--dim)" />
@@ -130,25 +137,9 @@ function StatsCards({ d }: { d: PanelData }) {
   );
 }
 
-function CostCards({ d }: { d: PanelData }) {
-  return (
-    <Card title="COST — THIS SESSION">
-      <Row label={`input · ${fmt(d.sessIn)} tok`} value={`$${((d.sessIn / 1e6) * 3).toFixed(2)}`} />
-      <Row
-        label={`output · ${fmt(d.sessOut)} tok`}
-        value={`$${((d.sessOut / 1e6) * 15).toFixed(2)}`}
-      />
-      <div className="k-card-rule" />
-      <Row label="total" value={`$${d.cost.toFixed(2)}`} tone="var(--green)" />
-      <Row label="billed to" value={`${d.acctName} · ${d.plan}`} tone="var(--dim)" />
-    </Card>
-  );
-}
-
 const TITLES: Record<PanelLineType['kind'], string> = {
   usage: 'usage',
   stats: 'session statistics',
-  cost: 'cost estimate',
 };
 
 export function PanelLine({ line, onCompact }: Props) {
@@ -159,7 +150,6 @@ export function PanelLine({ line, onCompact }: Props) {
       <div className="k-panel-cards">
         {line.kind === 'usage' ? <UsageCards d={d} onCompact={onCompact} /> : null}
         {line.kind === 'stats' ? <StatsCards d={d} /> : null}
-        {line.kind === 'cost' ? <CostCards d={d} /> : null}
       </div>
     </div>
   );

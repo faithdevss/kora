@@ -25,6 +25,13 @@ export function ErrLine({ line, query, onHint }: Props) {
           ?
         </div>
       ) : null}
+      {line.action ? (
+        <div className="k-err-action">
+          <button type="button" className="k-chip" onClick={() => onHint(line.action!.cmd)}>
+            {line.action.label}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

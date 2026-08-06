@@ -1,6 +1,13 @@
 /**
- * Phase 1 mock data — ported 1:1 from the design prototype
- * (`docs/design/Kora Terminal.dc.html`: AGENTS / ACCT / CMD_DESC / COMMON / RESP).
+ * Agent / account / command catalogue.
+ *
+ * Phase 2 removed the canned response fixtures — transcript content now comes
+ * from a real agent process. What remains is the static catalogue the UI needs
+ * before any process exists. Accounts stay mock until Phase 3 backs them with
+ * the keychain.
+ *
+ * Originally ported 1:1 from the design prototype
+ * (`docs/design/Kora Terminal.dc.html`: AGENTS / ACCT / CMD_DESC / COMMON).
  *
  * This module is the ONLY place mock data lives, so Phase 2/3 have a single
  * swap point. Static catalogue data (`AGENTS`, `ACCOUNTS`, `CMD_DESC`, `COMMON`)
@@ -154,43 +161,6 @@ export const COMMON = [
   '/tab',
 ];
 
-/** Canned agent responses used by the Phase 1 prompt simulation. */
-export interface MockResponse {
-  text: string;
-  block?: string;
-  lang?: string;
-  tool?: string;
-}
-
-export const RESP: MockResponse[] = [
-  {
-    text: 'Traced it to src/auth/session.ts:88 — the refresh timer is never cleared on logout, so tokens keep minting after sign-out. Cleanup below.',
-    block:
-      '  useEffect(() => {\n    const id = setInterval(refresh, 5*60_000)\n-   return\n+   return () => clearInterval(id)\n  }, [session.id])',
-    lang: 'diff',
-    tool: 'edited src/auth/session.ts · +1 −1',
-  },
-  {
-    text: 'Ran the suite: 128 passed, 2 failed in checkout.spec.ts. Both assert the old currency format. Want me to update the fixtures or the formatter?',
-    tool: 'bash · npm test — 2 failing',
-  },
-  {
-    text: "Indexed 214 files. PaymentService is imported in 9 places but mocked in only 3 tests — that's the flaky CI. I can add a shared mock in test/setup.ts.",
-    tool: 'grep · PaymentService — 9 refs',
-  },
-  {
-    text: 'Done. Pulled the duplicated pagination into usePaginated() and updated all three call sites. Types check clean.',
-    block:
-      'export function usePaginated<T>(rows: T[], size = 20) {\n  const [page, setPage] = useState(0)\n  const slice = rows.slice(page*size, page*size+size)\n  return { page, setPage, slice }\n}',
-    lang: 'ts',
-    tool: 'created src/hooks/usePaginated.ts',
-  },
-  {
-    text: 'Reviewed the diff — two nits: the `any` on line 42 hides a null case, and the error is swallowed in the catch. Otherwise good to merge.',
-    tool: 'review · 2 comments',
-  },
-];
-
 /** Workspace shown in the title bar. Phase 2 replaces this with the real cwd. */
 export const WORKSPACE = '~/workspace/api-gateway';
 
@@ -202,14 +172,12 @@ export const WORKSPACE = '~/workspace/api-gateway';
 export interface DataSource {
   agents(): Agent[];
   accountsFor(agentId: string): Account[];
-  /** Canned response used only while there is no real agent process. */
-  sampleResponse(): MockResponse;
+  /** Fallback workspace label, replaced by the real cwd once an agent spawns. */
   workspace(): string;
 }
 
 export const mockDataSource: DataSource = {
   agents: () => AGENTS,
   accountsFor: (agentId) => ACCOUNTS[agentId] ?? [],
-  sampleResponse: () => RESP[Math.floor(Math.random() * RESP.length)],
   workspace: () => WORKSPACE,
 };
