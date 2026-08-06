@@ -1,0 +1,150 @@
+/* Kora design tokens — verbatim from plan/00-master-plan.md "Design Tokens".
+   Every phase reuses these; never re-derive hex values elsewhere. */
+
+:root {
+  /* Base palette */
+  --bg: #0d0e11;
+  --panel: #14161b;
+  --panel-alt: #0f1116;
+  --border: #23262e;
+  --border-dim: #1c1f26;
+  --text: #d7dbe2;
+  --text-bright: #f2f4f8;
+  --dim: #727a88;
+  --dim2: #565d6b;
+  --green: #5bb98c;
+  --red: #e5695f;
+  --amber: #e0a34a;
+  --blue: #5a9df6;
+
+  /* Secondary surfaces used by the mockup */
+  --chrome: #101216;
+  --tabbar: #0f1115;
+  --hairline: #2b2f39;
+  --faint: #3a3f4c;
+  --dim3: #8891a0;
+
+  /* Active agent accent. Set on .k-root for the chrome, and again on each
+     .k-pane for that pane's own agent. Alpha variants are 8-digit hex rather
+     than color-mix() — color-mix() needs Safari 16.2, we target 15. */
+  --ac: #d97757;
+  --ac-dim: #d9775722; /* hover / palette highlight */
+  --ac-soft: #d9775712; /* active list-item background */
+  --ac-edge: #d9775766; /* active list-item border */
+  --glow: 0 0 10px #d9775788;
+
+  /* Bar/row geometry */
+  --h-titlebar: 30px;
+  --h-tabbar: 36px;
+  --h-statusbar: 33px;
+
+  /* Density (comfortable default; `compact` overrides on .density-compact) */
+  --fs-transcript: 13px;
+  --lh-transcript: 1.65;
+  --gap-transcript: 13px;
+  --pad-pane: 16px 20px;
+
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.density-compact {
+  --fs-transcript: 12px;
+  --lh-transcript: 1.5;
+  --gap-transcript: 9px;
+  --pad-pane: 12px 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+input {
+  font-family: inherit;
+}
+
+a {
+  color: var(--ac);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---- scrollbars ---- */
+.kscroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.kscroll::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 6px;
+  border: 2px solid var(--bg);
+}
+.kscroll::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+}
+.kscroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- animations ---- */
+@keyframes kblink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes kspin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes kfade {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes kpulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

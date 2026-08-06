@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default-deny baseline. Phase 1 grants the webview nothing beyond core window access; every later phase must add its commands here explicitly (see master plan, Security #2).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

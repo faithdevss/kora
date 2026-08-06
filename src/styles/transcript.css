@@ -1,0 +1,572 @@
+/* Transcript line renderers. One block per line type, matching the mockup's
+   buildLine() output. */
+
+.k-transcript {
+  font-size: var(--fs-transcript);
+  line-height: var(--lh-transcript);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-transcript);
+  padding-bottom: 8px;
+}
+
+.k-line {
+  animation: kfade 0.18s ease;
+}
+
+.k-ac {
+  color: var(--ac);
+}
+
+.k-mark {
+  background: #e0a34a55;
+  color: #fff;
+  border-radius: 2px;
+}
+
+.k-linkbtn {
+  color: var(--ac);
+  cursor: pointer;
+  text-decoration: underline;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+}
+
+/* ---------- banner ---------- */
+
+.k-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0 6px;
+}
+
+.k-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.k-banner-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--ac);
+  display: grid;
+  place-items: center;
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 14px;
+  box-shadow: var(--glow);
+}
+
+.k-banner-name {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-bright);
+}
+
+.k-banner-tag {
+  font-size: 11px;
+  color: var(--dim2);
+}
+
+.k-banner-sub {
+  font-size: 12px;
+  color: var(--dim);
+  line-height: 1.7;
+}
+
+/* ---------- cmd ---------- */
+
+.k-cmd {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.k-cmd-caret {
+  color: var(--ac);
+  font-weight: 700;
+}
+
+.k-cmd-text {
+  color: var(--text-bright);
+  font-weight: 500;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.k-cmd-atts {
+  color: var(--dim);
+  margin-left: 8px;
+  font-size: 11px;
+}
+
+/* ---------- resp ---------- */
+
+.k-resp {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.k-resp-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.k-resp-avatar {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  background: var(--ac);
+  flex: none;
+  margin-top: 2px;
+  display: grid;
+  place-items: center;
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 10px;
+}
+
+.k-resp-text {
+  color: var(--text);
+  line-height: 1.65;
+  flex: 1;
+  white-space: pre-wrap;
+}
+
+.k-resp-tool {
+  margin-left: 24px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+.k-resp-tool-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+/* ---------- code block ---------- */
+
+.k-code {
+  margin: 0 0 0 24px;
+  background: #0a0b0e;
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  padding: 11px 13px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+.k-code-plain {
+  color: #c4cad4;
+}
+
+.k-diff-add {
+  color: var(--green);
+}
+.k-diff-del {
+  color: var(--red);
+}
+.k-diff-meta {
+  color: var(--blue);
+}
+.k-diff-ctx {
+  color: var(--dim3);
+}
+
+/* ---------- out / dim / ok / err ---------- */
+
+.k-out {
+  margin: 0;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.k-dimline {
+  color: var(--dim2);
+  font-style: italic;
+}
+
+.k-ok {
+  display: flex;
+  gap: 8px;
+  color: var(--green);
+}
+
+.k-ok-text {
+  color: #a9d9bf;
+  flex: 1;
+}
+
+.k-err {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.k-err-row {
+  display: flex;
+  gap: 8px;
+  color: var(--red);
+}
+
+.k-err-text {
+  flex: 1;
+}
+
+.k-err-hint {
+  color: var(--dim);
+  padding-left: 20px;
+  font-size: 12px;
+}
+
+/* ---------- think ---------- */
+
+.k-think {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--dim);
+}
+
+.k-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--ac);
+  border-top-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: kspin 0.7s linear infinite;
+}
+
+.k-think-text {
+  animation: kpulse 1.4s infinite;
+}
+
+/* ---------- warn ---------- */
+
+.k-warn {
+  border: 1px solid #4a3a1c;
+  background: #1c160c;
+  border-radius: 9px;
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.k-warn-row {
+  display: flex;
+  gap: 9px;
+  color: #e8bf82;
+}
+
+.k-warn-text {
+  flex: 1;
+  line-height: 1.55;
+}
+
+.k-warn-chips {
+  display: flex;
+  gap: 8px;
+  padding-left: 22px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.k-chip {
+  cursor: pointer;
+  padding: 4px 11px;
+  border-radius: 6px;
+  background: #2a2110;
+  border: 1px solid #4a3a1c;
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+}
+
+.k-chip:hover {
+  background: #3a2d14;
+}
+
+.k-warn-note {
+  align-self: center;
+  font-size: 11px;
+  color: var(--dim2);
+}
+
+/* ---------- list ---------- */
+
+.k-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.k-list-title {
+  color: var(--dim);
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.k-list-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid #20232b;
+  background: var(--panel-alt);
+  cursor: pointer;
+  transition: background 0.12s;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+}
+
+.k-list-item.is-active {
+  border-color: var(--ac-edge);
+  background: var(--ac-soft);
+}
+
+.k-list-item:hover {
+  background: var(--ac-dim);
+}
+
+.k-list-pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+
+.k-list-pip.is-active {
+  background: var(--ac);
+}
+
+.k-list-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.k-list-label {
+  color: var(--text-bright);
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.k-list-item.is-active .k-list-label {
+  color: var(--ac);
+}
+
+.k-list-active {
+  margin-left: 9px;
+  font-size: 10px;
+  color: var(--ac);
+  font-weight: 400;
+}
+
+.k-list-sub {
+  color: var(--dim);
+  font-size: 11.5px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k-list-right {
+  color: var(--dim);
+  font-size: 11.5px;
+  flex: none;
+}
+
+.k-list-arrow {
+  color: var(--dim2);
+  flex: none;
+}
+
+/* ---------- help ---------- */
+
+.k-help {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.k-help-title {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.k-help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 3px 18px;
+}
+
+.k-help-row {
+  display: flex;
+  gap: 10px;
+  cursor: pointer;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
+}
+
+.k-help-cmd {
+  color: var(--ac);
+  min-width: 96px;
+  font-size: 12.5px;
+}
+
+.k-help-desc {
+  color: var(--dim3);
+  font-size: 12px;
+}
+
+.k-help-section {
+  color: var(--ac);
+  font-size: 11px;
+  margin-top: 4px;
+  letter-spacing: 0.4px;
+}
+
+/* ---------- panel ---------- */
+
+.k-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.k-panel-title {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.k-panel-cards {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.k-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-alt);
+  padding: 13px 15px;
+  min-width: 220px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.k-card-title {
+  font-size: 10.5px;
+  letter-spacing: 0.7px;
+  color: var(--ac);
+  font-weight: 500;
+}
+
+.k-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.k-card-body.is-wide {
+  gap: 9px;
+}
+
+.k-card-action {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--amber);
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+}
+
+.k-card-action:hover {
+  text-decoration: underline;
+}
+
+.k-card-healthy {
+  font-size: 11.5px;
+  color: var(--green);
+}
+
+.k-card-rule {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+
+.k-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.k-row-label {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.k-row-value {
+  color: var(--text-bright);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.k-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.k-meter-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.k-meter-label {
+  color: var(--dim);
+}
+
+.k-meter-pct {
+  font-weight: 500;
+}
+
+.k-meter-foot {
+  font-size: 11px;
+  color: var(--dim2);
+}
