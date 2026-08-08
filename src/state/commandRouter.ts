@@ -21,8 +21,9 @@ import {
   updateSession,
 } from './appState';
 import { accountPlan, accountSubtitle, isSubscription, totalTokens } from './accounts';
+import { bannerSuggestion, suggestions } from './suggestions';
 import { CMD_DESC, COMMON, AGENTS } from './mockFixtures';
-import { CTX_CLEAR, CTX_WARN, fmt, fmtWin } from './format';
+import { CTX_CLEAR, fmt, fmtWin } from './format';
 import type { Account, ListKind, PanelData, Session } from '../types/agent';
 
 /* ---------------- local vs passthrough ---------------- */
@@ -150,6 +151,8 @@ export function usageData(state: AppState, s: Session): PanelData {
     window: s.rateLimit?.window ?? null,
     week: (a && state.week[a.id]) ?? null,
     model: modelOf(s).name,
+    ctxStale: Boolean(s.ctxStale),
+    tips: suggestions(s),
   };
 }
 
@@ -313,31 +316,35 @@ function cmdHelp(state: AppState, id: string): AppState {
 /* ---------------- context tracking ---------------- */
 
 /**
- * Phase 1 mock threshold check. Phase 4 replaces the token math with real
- * usage reported by the agent, but keeps this warn-once/reset-below behaviour.
+ * Raises the context banner when a real threshold is crossed.
+ *
+ * The numbers are the agent's own (Phase 2 folds `usage` from every turn into
+ * `ctxUsed`/`ctxWin`), the copy is the docs' (`features.gpt.md` §8), and each
+ * threshold fires once per climb: `warned` records which one was last raised,
+ * and only a drop back under `CTX_CLEAR` re-arms them. Crossing 70% and then
+ * 90% therefore gives two banners, not two hundred.
  */
 export function checkContext(state: AppState, id: string): AppState {
   const s = sessionById(state, id);
   if (!s) return state;
-  const pct = s.ctxUsed / s.ctxWin;
+  const pct = s.ctxWin > 0 ? s.ctxUsed / s.ctxWin : 0;
 
-  if (pct >= CTX_WARN && !s.suggested) {
-    const marked = updateSession(state, id, (sess) => ({ ...sess, suggested: true }));
-    return pushLine(marked, id, {
-      t: 'warn',
-      text:
-        `Context just crossed ${Math.round(pct * 100)}% of the ${fmtWin(s.ctxWin)} window. ` +
-        'Reclaim tokens (and cost) before the next turn.',
-      chips: [
-        { label: '/compact', cmd: '/compact' },
-        { label: '/clear', cmd: '/clear' },
-      ],
-    });
+  if (pct < CTX_CLEAR && s.warned) {
+    return updateSession(state, id, (sess) => ({ ...sess, warned: undefined }));
   }
-  if (pct < CTX_CLEAR && s.suggested) {
-    return updateSession(state, id, (sess) => ({ ...sess, suggested: false }));
-  }
-  return state;
+
+  const suggestion = bannerSuggestion(s);
+  if (!suggestion || suggestion.id === s.warned) return state;
+  // Urgent supersedes the informational banner; the reverse does not, or a
+  // conversation hovering at 90% would re-warn every time it dipped.
+  if (s.warned === 'context-urgent' && suggestion.id === 'context-high') return state;
+
+  const marked = updateSession(state, id, (sess) => ({ ...sess, warned: suggestion.id }));
+  return pushLine(marked, id, {
+    t: 'warn',
+    text: suggestion.text,
+    chips: suggestion.chips,
+  });
 }
 
 /* ---------------- tabs / panes ---------------- */

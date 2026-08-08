@@ -178,36 +178,63 @@ describe('command coverage', () => {
 });
 
 describe('checkContext', () => {
-  it('warns once when crossing 72% and re-arms below 60%', () => {
-    let s = state;
+  /** Puts the focused session at a given fill of its 200k window. */
+  function at(s: AppState, pct: number): AppState {
     const id = s.focusedId;
-    s = {
+    return {
       ...s,
       sessions: s.sessions.map((x) =>
-        x.id === id ? { ...x, ctxUsed: 150000, suggested: false } : x,
+        x.id === id ? { ...x, ctxUsed: Math.round(200000 * pct) } : x,
       ),
     };
+  }
+
+  it('warns once when crossing 70% and re-arms below 60%', () => {
+    let s = at(state, 0.75);
+    const id = s.focusedId;
     s = checkContext(s, id);
     expect(lastLine(s)).toMatchObject({ t: 'warn' });
-    expect(focusedSession(s).suggested).toBe(true);
+    expect(focusedSession(s).warned).toBe('context-high');
 
     const before = focusedSession(s).lines.length;
     s = checkContext(s, id);
     expect(focusedSession(s).lines).toHaveLength(before); // does not warn twice
 
-    s = { ...s, sessions: s.sessions.map((x) => (x.id === id ? { ...x, ctxUsed: 10000 } : x)) };
-    s = checkContext(s, id);
-    expect(focusedSession(s).suggested).toBe(false);
+    s = checkContext(at(s, 0.05), id);
+    expect(focusedSession(s).warned).toBeUndefined();
+  });
+
+  it('uses the exact wording the docs specify, with the real percentage', () => {
+    const high = lastLine(checkContext(at(state, 0.75), state.focusedId));
+    if (high.t !== 'warn') throw new Error('expected warn');
+    expect(high.text).toBe(
+      'Context is now 75%. Consider clearing previous messages to improve quality and reduce token usage.',
+    );
+
+    const urgent = lastLine(checkContext(at(state, 0.95), state.focusedId));
+    if (urgent.t !== 'warn') throw new Error('expected warn');
+    expect(urgent.text).toBe(
+      'Context exceeds 90%. Start a new session or compact the conversation.',
+    );
+  });
+
+  it('escalates from the 70% warning to the 90% one, but not back', () => {
+    const id = state.focusedId;
+    let s = checkContext(at(state, 0.75), id);
+    s = checkContext(at(s, 0.95), id);
+    expect(focusedSession(s).warned).toBe('context-urgent');
+    const raised = lastLine(s);
+    if (raised.t !== 'warn') throw new Error('expected warn');
+    expect(raised.text).toContain('exceeds 90%');
+
+    // Slipping back to 75% must not re-raise the quieter banner.
+    const before = focusedSession(s).lines.length;
+    s = checkContext(at(s, 0.75), id);
+    expect(focusedSession(s).lines).toHaveLength(before);
   });
 
   it('warn chips carry runnable /compact and /clear commands', () => {
-    let s = state;
-    const id = s.focusedId;
-    s = {
-      ...s,
-      sessions: s.sessions.map((x) => (x.id === id ? { ...x, ctxUsed: 150000, suggested: false } : x)),
-    };
-    const line = lastLine(checkContext(s, id));
+    const line = lastLine(checkContext(at(state, 0.75), state.focusedId));
     if (line.t !== 'warn') throw new Error('expected warn');
     expect(line.chips.map((c) => c.cmd)).toEqual(['/compact', '/clear']);
   });

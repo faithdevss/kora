@@ -36,6 +36,7 @@ import {
   toggleSplit as toggleSplitFn,
 } from './commandRouter';
 import { accountSubtitle } from './accounts';
+import { fmt } from './format';
 import { mockDataSource, type DataSource } from './mockFixtures';
 import {
   defaultBridge,
@@ -87,6 +88,8 @@ export class SessionStore {
   private cwd: string | null = null;
   /** Sessions whose resume has not yet proved itself by producing output. */
   private resumePending = new Set<string>();
+  /** Sessions that sent `/clear` and are waiting for the CLI to confirm it. */
+  private pendingClear = new Set<string>();
   private disposed = false;
   /** Pending transcript writes, one timer per session (auto-save is debounced). */
   private saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -512,12 +515,7 @@ export class SessionStore {
         break;
 
       case 'compacted':
-        this.set(
-          pushLine(this.state, sessionId, {
-            t: 'ok',
-            text: 'Context compacted by the agent — earlier turns were summarized.',
-          }),
-        );
+        this.compacted(sessionId, event.pre_tokens, event.trigger);
         break;
 
       case 'notice':
@@ -638,9 +636,22 @@ export class SessionStore {
         cacheRead: s.cacheRead + usage.cache_read_tokens,
         ctxUsed: contextUsed || s.ctxUsed,
         ctxWin: usage.context_window ?? s.ctxWin,
+        // A real measurement supersedes the "approximate since compaction" mark.
+        ctxStale: contextUsed ? false : s.ctxStale,
         costUsd: usage.total_cost_usd && usage.total_cost_usd > 0 ? usage.total_cost_usd : s.costUsd,
       };
     });
+
+    // A `/clear` the CLI accepted means its context is empty; Kora's count
+    // follows rather than waiting a turn to notice.
+    if (this.pendingClear.delete(sessionId) && !event.is_error) {
+      next = updateSession(next, sessionId, (s) => ({
+        ...s,
+        ctxUsed: 0,
+        ctxStale: false,
+        warned: undefined,
+      }));
+    }
 
     this.set(checkContext(next, sessionId));
     if (usage) void this.recordUsage(sessionId, usage);
@@ -666,6 +677,38 @@ export class SessionStore {
     } catch {
       /* the conversation matters more than the bookkeeping */
     }
+  }
+
+  /**
+   * The agent compacted its own context.
+   *
+   * It reports what the context held *before* compacting, which is the only
+   * number it has at that moment — the new size is not known until the next
+   * turn reports usage. So Kora says what was freed from, marks its own figure
+   * approximate, and waits rather than inventing a post-compaction total.
+   * Kora never produces the summary itself (phase 4, acceptance criterion 5).
+   */
+  private compacted(
+    sessionId: string,
+    preTokens: number | null,
+    trigger: string | null,
+  ): void {
+    const by = trigger === 'auto' ? 'automatically' : '';
+    const from = preTokens ? ` It was ${fmt(preTokens)} tokens before.` : '';
+    let next = updateSession(this.state, sessionId, (s) => ({
+      ...s,
+      ctxStale: true,
+      // A compaction is a fresh start for the warnings: the next real
+      // measurement decides whether they apply again.
+      warned: undefined,
+    }));
+    next = pushLine(next, sessionId, {
+      t: 'ok',
+      text:
+        `Context compacted ${by}by the agent — earlier turns were summarized.${from} ` +
+        'The new size arrives with the next turn.',
+    });
+    this.set(next);
   }
 
   /** Turns an unexpected process exit into a respawn offer. */
@@ -1276,6 +1319,10 @@ export class SessionStore {
       );
       return;
     }
+
+    // `/clear` is the CLI's own command; Kora only needs to know the answer so
+    // it can follow with its own tracking (phase 4, acceptance criterion 3).
+    if (text.trim().toLowerCase() === '/clear') this.pendingClear.add(sessionId);
 
     next = pushLine(next, sessionId, { t: 'think', rid: 0 });
     next = updateSession(next, sessionId, (s) => ({

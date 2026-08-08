@@ -128,7 +128,13 @@ pub enum AgentEvent {
         resets_at: Option<i64>,
     },
     /// Context was compacted by the agent itself.
-    Compacted,
+    Compacted {
+        /// What the agent says the context held before compacting, when it says.
+        pre_tokens: Option<u64>,
+        /// e.g. `"manual"` for a user `/compact`, `"auto"` when the agent
+        /// decided on its own. `None` when unreported.
+        trigger: Option<String>,
+    },
     /// Informational agent output that is not assistant prose.
     Notice { text: String },
     /// Something went wrong but the session is still alive.

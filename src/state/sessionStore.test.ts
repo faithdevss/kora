@@ -257,7 +257,7 @@ describe('a real turn', () => {
   });
 
   it('reports agent-side compaction', async () => {
-    bridge.emit(store.getState().focusedId, { kind: 'compacted' });
+    bridge.emit(store.getState().focusedId, { kind: 'compacted', pre_tokens: null, trigger: null });
     expect(last()).toMatchObject({ t: 'ok' });
     expect((last() as { text: string }).text).toContain('compacted');
   });
@@ -872,5 +872,105 @@ describe('session persistence', () => {
     store.runQuick('/session');
     await settle();
     expect(last()).toMatchObject({ t: 'list' });
+  });
+});
+
+describe('context tracking', () => {
+  beforeEach(boot);
+
+  /** Ends a turn with the given real usage, as the agent would report it. */
+  function turn(over: Partial<ReturnType<typeof usage>> = {}): void {
+    bridge.emit(store.getState().focusedId, {
+      kind: 'turn_end',
+      text: '',
+      usage: usage({ context_window: 200000, ...over }),
+      is_error: false,
+    });
+  }
+
+  it('tracks context against the window the agent reports', async () => {
+    turn({ input_tokens: 40000, cache_read_tokens: 20000, output_tokens: 1000 });
+    expect(session().ctxWin).toBe(200000);
+    expect(session().ctxUsed).toBe(61000);
+  });
+
+  it('warns at the real 70% crossing, once', async () => {
+    turn({ input_tokens: 150000, output_tokens: 1000 });
+    const warns = lines().filter((l) => l.t === 'warn');
+    expect(warns).toHaveLength(1);
+    expect((warns[0] as { text: string }).text).toContain('Consider clearing previous messages');
+
+    turn({ input_tokens: 151000, output_tokens: 1000 });
+    expect(lines().filter((l) => l.t === 'warn')).toHaveLength(1);
+  });
+
+  it('escalates to the urgent copy when the window is nearly full', async () => {
+    turn({ input_tokens: 150000, output_tokens: 1000 });
+    turn({ input_tokens: 190000, output_tokens: 1000 });
+    const warns = lines().filter((l) => l.t === 'warn') as { text: string }[];
+    expect(warns).toHaveLength(2);
+    expect(warns[1].text).toBe('Context exceeds 90%. Start a new session or compact the conversation.');
+  });
+
+  it('marks the figure approximate after a compaction, until the next turn', async () => {
+    turn({ input_tokens: 150000, output_tokens: 1000 });
+    bridge.emit(store.getState().focusedId, {
+      kind: 'compacted',
+      pre_tokens: 151000,
+      trigger: 'manual',
+    });
+
+    expect(session().ctxStale).toBe(true);
+    // What the agent freed *from* is the only number it has at that moment.
+    expect((last() as { text: string }).text).toContain('151k tokens before');
+    // Kora invents no post-compaction total.
+    expect(session().ctxUsed).toBe(151000);
+
+    turn({ input_tokens: 20000, output_tokens: 500 });
+    expect(session().ctxStale).toBe(false);
+    expect(session().ctxUsed).toBe(20500);
+  });
+
+  it('resets tracking when the CLI accepts a /clear', async () => {
+    turn({ input_tokens: 150000, output_tokens: 1000 });
+    expect(session().ctxUsed).toBeGreaterThan(0);
+
+    store.setInput('/clear');
+    store.submit();
+    await Promise.resolve();
+    expect(bridge.writes.at(-1)).toEqual([store.getState().focusedId, '/clear']);
+
+    // The CLI answers a local command with a turn carrying no tokens.
+    bridge.emit(store.getState().focusedId, {
+      kind: 'turn_end',
+      text: 'Context cleared',
+      usage: usage({ input_tokens: 0, output_tokens: 0 }),
+      is_error: false,
+    });
+    expect(session().ctxUsed).toBe(0);
+    expect(session().warned).toBeUndefined();
+  });
+
+  it('leaves tracking alone when the CLI rejects a /clear', async () => {
+    turn({ input_tokens: 150000, output_tokens: 1000 });
+    const before = session().ctxUsed;
+
+    store.setInput('/clear');
+    store.submit();
+    await Promise.resolve();
+    bridge.emit(store.getState().focusedId, {
+      kind: 'turn_end',
+      text: 'not now',
+      usage: null,
+      is_error: true,
+    });
+    expect(session().ctxUsed).toBe(before);
+  });
+
+  it('never summarizes anything itself — /compact goes to the agent', async () => {
+    const id = store.getState().focusedId;
+    store.runQuick('/compact');
+    await Promise.resolve();
+    expect(bridge.writes).toContainEqual([id, '/compact']);
   });
 });

@@ -155,13 +155,14 @@ export function mkSession(agentId: string, account?: Account): Session {
     account: account?.agent_id === agentId ? account : undefined,
     modelId: m.id,
     ctxWin: m.win,
-    ctxUsed: 1400,
+    // Nothing has been sent yet, so nothing is in context. The agent's first
+    // turn reports the real figure, system prompt and all.
+    ctxUsed: 0,
     sessIn: 0,
     sessOut: 0,
     cacheRead: 0,
     msgs: 0,
     history: [],
-    suggested: false,
     lines: [{ key: nextLineKey(), t: 'banner' }],
     // No process until the store spawns one; agents without a real adapter
     // stay here permanently.

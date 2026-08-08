@@ -197,7 +197,7 @@ describe('command routing', () => {
     await send('/compact');
     expect(bridge.writes.at(-1)).toEqual([sid(), '/compact']);
 
-    await emit(sid(), { kind: 'compacted' });
+    await emit(sid(), { kind: 'compacted', pre_tokens: null, trigger: null });
     expect(screen.getByText(/Context compacted by the agent/)).toBeTruthy();
   });
 

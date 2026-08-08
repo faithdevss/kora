@@ -37,7 +37,7 @@ export type AgentEvent =
   | { kind: 'turn_end'; text: string; usage: AgentUsage | null; is_error: boolean }
   | { kind: 'models'; models: AgentModel[] }
   | { kind: 'rate_limit'; window: string; utilization: number; resets_at: number | null }
-  | { kind: 'compacted' }
+  | { kind: 'compacted'; pre_tokens: number | null; trigger: string | null }
   | { kind: 'notice'; text: string }
   | { kind: 'error'; message: string }
   | { kind: 'exited'; code: number | null; recoverable: boolean };

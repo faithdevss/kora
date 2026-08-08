@@ -108,6 +108,22 @@ export interface QuickChip {
   cmd: string;
 }
 
+export type SuggestionTone = 'urgent' | 'info';
+
+/**
+ * One optimization suggestion. Produced only from measured conditions, and its
+ * actions are always real commands — Kora never edits the conversation itself
+ * (see `state/suggestions.ts`).
+ */
+export interface Suggestion {
+  /** Stable per rule, so a banner can fire once per crossing. */
+  id: string;
+  tone: SuggestionTone;
+  text: string;
+  /** One-click actions. Empty when the suggestion is only an observation. */
+  chips: QuickChip[];
+}
+
 export interface ListItem {
   id: string;
   label: string;
@@ -155,6 +171,10 @@ export interface PanelData {
   /** Kora's own rolling 7-day record for this account, or `null` if untracked. */
   week: UsageTotals | null;
   model: string;
+  /** True when the context figure predates a compaction the agent just did. */
+  ctxStale: boolean;
+  /** Optimization suggestions that currently apply. Empty when none do. */
+  tips: Suggestion[];
   avgIn?: number;
   avgOut?: number;
 }
@@ -328,8 +348,18 @@ export interface Session {
   cacheRead: number;
   msgs: number;
   history: string[];
-  /** True once the context warning has fired, so it fires only once per climb. */
-  suggested: boolean;
+  /**
+   * Id of the context banner last raised, so each threshold fires once per
+   * climb rather than on every turn above it. Cleared when context drops back
+   * under `CTX_CLEAR`.
+   */
+  warned?: string;
+  /**
+   * True between a compaction and the next turn that reports usage: the agent
+   * has thrown context away, so the last measurement is known to be too high
+   * and the UI marks it approximate rather than quietly showing a stale number.
+   */
+  ctxStale?: boolean;
   lines: TranscriptLine[];
 
   /* ---- Phase 2: the live process behind this tab ---- */

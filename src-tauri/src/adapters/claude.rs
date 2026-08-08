@@ -178,7 +178,19 @@ impl ClaudeAdapter {
                     scope,
                 });
             }
-            "compact_boundary" => out.push(AgentEvent::Compacted),
+            // The CLI reports what the context held before it compacted, which
+            // is the only real measure of what compaction freed — the new size
+            // is not known until the next turn reports its usage.
+            "compact_boundary" => {
+                let meta = v.get("compact_metadata");
+                out.push(AgentEvent::Compacted {
+                    pre_tokens: meta.and_then(|m| m.get("pre_tokens")).and_then(Value::as_u64),
+                    trigger: meta
+                        .and_then(|m| m.get("trigger"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            }
             "api_error" => {
                 if let Some(msg) = v.get("message").and_then(Value::as_str) {
                     out.push(AgentEvent::Error {
@@ -764,10 +776,27 @@ mod tests {
     }
 
     #[test]
-    fn compact_boundary_reports_a_compaction() {
+    fn compact_boundary_reports_a_compaction_and_what_it_freed() {
+        assert_eq!(
+            parse(
+                r#"{"type":"system","subtype":"compact_boundary",
+                    "compact_metadata":{"trigger":"manual","pre_tokens":152000}}"#
+            ),
+            vec![AgentEvent::Compacted {
+                pre_tokens: Some(152000),
+                trigger: Some("manual".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn a_compaction_without_metadata_reports_no_numbers_rather_than_zero() {
         assert_eq!(
             parse(r#"{"type":"system","subtype":"compact_boundary"}"#),
-            vec![AgentEvent::Compacted]
+            vec![AgentEvent::Compacted {
+                pre_tokens: None,
+                trigger: None
+            }]
         );
     }
 

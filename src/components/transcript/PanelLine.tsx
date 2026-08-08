@@ -1,11 +1,12 @@
 import type { PanelData, PanelLine as PanelLineType } from '../../types/agent';
 import { Bar } from '../Bits';
-import { CTX_WARN, compactTarget, ctxTone, fmt, fmtWin } from '../../state/format';
+import { CTX_WARN, ctxTone, fmt, fmtWin } from '../../state/format';
 import { totalTokens } from '../../state/accounts';
 
 interface Props {
   line: PanelLineType;
-  onCompact: () => void;
+  /** Runs a command on the session this panel belongs to. */
+  onRun: (cmd: string) => void;
 }
 
 function Card({
@@ -78,21 +79,60 @@ function weekCost(d: PanelData): number | null {
   return d.week?.cost_usd ?? d.week?.estimated_cost_usd ?? null;
 }
 
-function UsageCards({ d, onCompact }: { d: PanelData; onCompact: () => void }) {
+/**
+ * Suggestions, shown quietly.
+ *
+ * Every one of these fired on a measured condition, and every action is a real
+ * command — the agent's `/compact` and `/clear`, or a Kora tab. Nothing here
+ * rewrites the conversation (`docs/features.gpt.md` §9, "never intrusive").
+ */
+function TipsCard({ d, onRun }: { d: PanelData; onRun: (cmd: string) => void }) {
+  if (!d.tips.length) return null;
+  return (
+    <Card title="SUGGESTIONS" wide>
+      {d.tips.map((tip) => (
+        <div key={tip.id} className="k-tip">
+          <div className={'k-tip-text is-' + tip.tone}>{tip.text}</div>
+          {tip.chips.length ? (
+            <div className="k-tip-chips">
+              {tip.chips.map((c) => (
+                <button
+                  key={c.cmd}
+                  type="button"
+                  className="k-card-action"
+                  onClick={() => onRun(c.cmd)}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+function UsageCards({ d, onRun }: { d: PanelData; onRun: (cmd: string) => void }) {
+  const onCompact = () => onRun('/compact');
   const tone = ctxTone(d.ctxPct);
   return (
     <>
       <Card title="CONTEXT WINDOW" wide>
         <Meter
           label={d.model}
-          current={`${fmt(d.ctxUsed)} used`}
+          // Marked approximate between a compaction and the next turn, when
+          // the agent has dropped context it has not yet re-counted.
+          current={`${d.ctxStale ? '≈' : ''}${fmt(d.ctxUsed)} used`}
           max={fmtWin(d.ctxWin)}
           pct={d.ctxPct}
           color={tone}
         />
-        {d.ctxPct >= CTX_WARN ? (
+        {d.ctxStale ? (
+          <div className="k-card-healthy">measured before the last compaction — updates next turn</div>
+        ) : d.ctxPct >= CTX_WARN ? (
           <button type="button" className="k-card-action" onClick={onCompact}>
-            → /compact to reclaim ~{fmt(d.ctxUsed - compactTarget(d.ctxWin))} tokens
+            → /compact — the agent decides what to summarize
           </button>
         ) : (
           <div className="k-card-healthy">✓ healthy — plenty of headroom</div>
@@ -172,14 +212,15 @@ const TITLES: Record<PanelLineType['kind'], string> = {
   stats: 'session statistics',
 };
 
-export function PanelLine({ line, onCompact }: Props) {
+export function PanelLine({ line, onRun }: Props) {
   const d = line.data;
   return (
     <div className="k-panel">
       <div className="k-panel-title">{TITLES[line.kind]}</div>
       <div className="k-panel-cards">
-        {line.kind === 'usage' ? <UsageCards d={d} onCompact={onCompact} /> : null}
+        {line.kind === 'usage' ? <UsageCards d={d} onRun={onRun} /> : null}
         {line.kind === 'stats' ? <StatsCards d={d} /> : null}
+        <TipsCard d={d} onRun={onRun} />
       </div>
     </div>
   );

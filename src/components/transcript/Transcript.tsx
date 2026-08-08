@@ -75,7 +75,7 @@ function Line({
     case 'help':
       return <HelpLine line={line} onPickCmd={actions.fillInput} />;
     case 'panel':
-      return <PanelLine line={line} onCompact={() => actions.runQuick('/compact')} />;
+      return <PanelLine line={line} onRun={actions.runQuick} />;
     case 'perm':
       return <PermLine line={line} onAnswer={actions.answerPermission} />;
   }

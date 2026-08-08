@@ -48,3 +48,59 @@ src/
 3. `/clear` invokes the real CLI's clear behavior and Kora's context tracking resets to match.
 4. Suggestion chips only appear when a real condition is met (context high, cache reuse available, etc.) — never shown unconditionally, and clicking a suggestion chip triggers the real passthrough command, not a Kora-side approximation.
 5. No Kora-side code independently summarizes, rewrites, or discards conversation content — confirmed by the removal of any auxiliary-prompt-based compaction path from this phase's implementation.
+
+---
+
+## Implementation notes
+
+### Where the tracker lives, and why it is not `src-tauri/src/context/`
+
+The key-files list proposed a Rust `context/` module with `context_get` /
+`context_compact` / `context_clear` commands. That was written before Phase 2
+established that context arrives as *events*: every `result` line carries
+`usage` (input, output, cache read/creation) and `modelUsage[…].contextWindow`,
+which the manager already forwards to the frontend, where the session state
+lives. A Rust tracker would have to be told the same numbers over IPC and then
+asked for them back, so the accounting stays in `state/sessionStore.ts` where
+the data already is. `/compact` and `/clear` are passthrough (Phase 2), so there
+are no commands to add for them either — Kora only listens to the answers.
+
+The suggestion rules (`src/state/suggestions.ts`) are a pure function of session
+state for the same reason: every input is already in the frontend, and every
+output is a chip in the UI.
+
+### What "context used" means
+
+The sum of one turn's `input + cache_read + cache_creation + output`, i.e. what
+the model actually saw — not a running total across turns, which would double
+count the whole conversation on every reply. The window is
+`modelUsage[…].contextWindow` when reported, so switching models moves the
+denominator to the real one.
+
+### Compaction reports what it freed *from*, not what is left
+
+`compact_boundary` carries `compact_metadata.pre_tokens` — the size before
+compacting. The new size is genuinely unknown until the next turn reports usage,
+so Kora states the before-figure, marks its own number approximate (`ctxStale`,
+rendered `≈` in the panel and re-armed warnings), and waits. It never invents a
+post-compaction total, and never produces the summary itself.
+
+### `/clear`
+
+Kora notes that a `/clear` is in flight, and zeroes its tracking when the CLI
+answers without an error. If the CLI refuses, the count is left alone. This is
+inference from Kora's own command plus the agent's answer, which is the honest
+maximum available: the CLI emits no dedicated "context cleared" event.
+
+### Fake math removed
+
+`compactTarget()` (`ctxWin * 0.28`, the mockup's invented "tokens you would
+reclaim") and `estTok()` (character-count token estimate) are both deleted. The
+status bar's suggestion button and the `/usage` panel now come from the rules
+engine, so every number on screen is one an agent reported.
+
+### Thresholds
+
+70% informational, 90% urgent, verbatim copy from `docs/features.gpt.md` §8.
+Each fires once per climb; the urgent one supersedes the informational one, the
+reverse does not, and dropping back under 60% re-arms both.
