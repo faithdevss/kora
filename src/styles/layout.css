@@ -743,3 +743,338 @@
   color: var(--dim2);
   border-color: var(--border);
 }
+
+/* ---------- global command palette (Phase 6) ---------- */
+
+.k-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 5, 7, 0.55);
+  z-index: 60;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 90px 16px 24px;
+}
+
+.k-gpalette {
+  width: 620px;
+  max-width: 100%;
+  max-height: 60vh;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.k-gpalette-input {
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  outline: none;
+  color: var(--text-bright);
+  font-family: inherit;
+  font-size: 14px;
+  padding: 14px 16px;
+  caret-color: var(--ac);
+}
+
+.k-gpalette-list {
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.k-gpalette-item {
+  display: grid;
+  grid-template-columns: 68px minmax(0, auto) 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 7px 10px;
+  text-align: left;
+  font-family: inherit;
+  color: var(--text);
+}
+
+.k-gpalette-item.is-on {
+  background: var(--ac-soft);
+}
+
+.k-gpalette-group {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dim3);
+}
+
+.k-gpalette-label {
+  font-size: 12.5px;
+  color: var(--text-bright);
+  white-space: nowrap;
+}
+
+.k-gpalette-hint {
+  font-size: 11.5px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k-gpalette-chord {
+  font-size: 11px;
+  color: var(--dim2);
+  white-space: nowrap;
+}
+
+.k-gpalette-empty {
+  padding: 16px;
+  font-size: 12px;
+  color: var(--dim2);
+}
+
+/* ---------- settings panel (Phase 6) ---------- */
+
+.k-settings {
+  width: 620px;
+  max-width: 100%;
+  max-height: 76vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
+  padding: 16px 18px 20px;
+  outline: none;
+}
+
+.k-settings-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.k-settings-title {
+  font-size: 13px;
+  color: var(--ac);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.k-settings-version {
+  flex: 1;
+  font-size: 11px;
+  color: var(--dim2);
+}
+
+.k-settings-group {
+  padding: 14px 0 4px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.k-settings-group:last-child {
+  border-bottom: none;
+}
+
+.k-settings-h {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim2);
+}
+
+.k-settings-note {
+  margin: -4px 0 10px;
+  font-size: 11px;
+  color: var(--dim3);
+  line-height: 1.5;
+}
+
+.k-set-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 0;
+}
+
+.k-set-label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.k-set-hint {
+  font-size: 11px;
+  color: var(--dim3);
+  line-height: 1.4;
+}
+
+.k-set-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.k-set-value {
+  font-size: 11.5px;
+  color: var(--dim);
+  min-width: 44px;
+}
+
+.k-select,
+.k-text {
+  background: #14161c;
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  color: var(--text-bright);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 7px;
+  outline: none;
+  min-width: 160px;
+}
+
+.k-select:focus,
+.k-text:focus {
+  border-color: var(--ac-edge);
+}
+
+.k-range {
+  accent-color: var(--ac);
+  width: 140px;
+}
+
+.k-toggle {
+  cursor: pointer;
+  width: 34px;
+  height: 19px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline);
+  background: #14161c;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.k-toggle.is-on {
+  background: var(--ac-dim);
+  border-color: var(--ac-edge);
+  justify-content: flex-end;
+}
+
+.k-toggle-knob {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--dim2);
+}
+
+.k-toggle.is-on .k-toggle-knob {
+  background: var(--ac);
+}
+
+.k-keymap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.k-keymap-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--dim);
+}
+
+.k-keymap-chord {
+  color: var(--text-bright);
+}
+
+/* ---------- notifications (Phase 6) ---------- */
+
+.k-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 380px;
+}
+
+.k-toast {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--ac);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+  padding: 9px 11px;
+  font-size: 12px;
+  color: var(--text);
+  animation: kfade 0.18s ease;
+}
+
+.k-toast.is-errors,
+.k-toast.is-auth {
+  border-left-color: var(--red);
+}
+
+.k-toast.is-context,
+.k-toast.is-usage {
+  border-left-color: var(--amber);
+}
+
+.k-toast-icon {
+  color: var(--dim2);
+}
+
+.k-toast-text {
+  flex: 1;
+  line-height: 1.45;
+}
+
+.k-toast-action {
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--ac);
+  white-space: nowrap;
+}
+
+.k-toast-close {
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--dim2);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.k-toast-close:hover {
+  color: var(--text-bright);
+}

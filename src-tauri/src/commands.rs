@@ -16,6 +16,7 @@ use crate::accounts::Account;
 use crate::adapters::{adapter_for, AccountIdentity, Attachment, Capability, PermissionDecision};
 use crate::files::{ingest, open};
 use crate::proc::manager::SessionManager;
+use crate::settings::config::{Settings, SettingsStore};
 use crate::store::{sessions, usage, Db};
 
 /// Longest session id we will accept from the frontend.
@@ -27,6 +28,23 @@ const MAX_ATTACHMENTS: usize = 12;
 /// Ceiling on a base64 payload arriving from the webview, comfortably above the
 /// image limit the ingest layer enforces on the decoded bytes.
 const MAX_INGEST_BASE64: usize = 8 * 1024 * 1024;
+
+/// Longest free-text field (a name, a query, a path) the webview may send.
+///
+/// Not a security boundary on its own — everything below also validates its
+/// shape — but it stops a runaway webview from handing the backend a megabyte
+/// where a word was expected.
+const MAX_FIELD: usize = 4096;
+/// Longest session export the webview may hand back for import.
+const MAX_IMPORT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Rejects an over-long free-text field, naming what was too long.
+fn validate_len(what: &str, value: &str) -> Result<(), String> {
+    if value.len() > MAX_FIELD {
+        return Err(format!("{what} is too long"));
+    }
+    Ok(())
+}
 
 /// Session ids are minted by the frontend (`s1`, `s2`, …). Accept only that
 /// shape so an id can never be smuggled into a path or an argv entry.
@@ -249,6 +267,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_free_text_field_is_bounded() {
+        assert!(validate_len("name", "personal").is_ok());
+        assert!(validate_len("name", &"x".repeat(MAX_FIELD)).is_ok());
+        let err = validate_len("account name", &"x".repeat(MAX_FIELD + 1)).unwrap_err();
+        assert_eq!(err, "account name is too long", "the message names the field");
+    }
+
+    #[test]
     fn session_ids_are_restricted_to_a_safe_alphabet() {
         for ok in ["s1", "s-2", "s_3", "abc123"] {
             assert!(validate_session_id(ok).is_ok(), "{ok} should be accepted");
@@ -348,6 +374,7 @@ pub async fn accounts_add(
     agent_id: String,
     name: String,
 ) -> Result<Account, String> {
+    validate_len("account name", &name)?;
     accounts.add(&agent_id, &name).await
 }
 
@@ -357,6 +384,7 @@ pub async fn accounts_rename(
     account_id: String,
     name: String,
 ) -> Result<(), String> {
+    validate_len("account name", &name)?;
     accounts.rename(&account_id, &name).await
 }
 
@@ -451,6 +479,7 @@ pub async fn sessions_rename(
     name: String,
 ) -> Result<(), String> {
     validate_session_id(&session_id)?;
+    validate_len("session name", &name)?;
     sessions::rename(&db, &session_id, &name).await
 }
 
@@ -485,6 +514,7 @@ pub async fn sessions_export_file(
     path: Option<String>,
 ) -> Result<String, String> {
     validate_session_id(&session_id)?;
+    validate_len("file path", path.as_deref().unwrap_or_default())?;
     let export = sessions::export(&db, &session_id).await?;
     let json = serde_json::to_string_pretty(&export).map_err(|e| e.to_string())?;
 
@@ -507,6 +537,7 @@ pub async fn sessions_import_file(
     db: State<'_, Db>,
     path: String,
 ) -> Result<sessions::SessionMeta, String> {
+    validate_len("file path", &path)?;
     let target = expand_tilde(path.trim());
     let json = std::fs::read_to_string(&target)
         .map_err(|e| format!("could not read {}: {e}", target.display()))?;
@@ -542,6 +573,9 @@ pub async fn sessions_import(
     db: State<'_, Db>,
     json: String,
 ) -> Result<sessions::SessionMeta, String> {
+    if json.len() > MAX_IMPORT_BYTES {
+        return Err("that session export is too large to import".into());
+    }
     let parsed: sessions::SessionExport =
         serde_json::from_str(&json).map_err(|e| format!("not a Kora session export: {e}"))?;
     sessions::import(&db, parsed).await
@@ -567,6 +601,8 @@ pub async fn usage_record(
     model: Option<String>,
     turn: crate::adapters::Usage,
 ) -> Result<bool, String> {
+    validate_len("agent id", &agent_id)?;
+    validate_len("model", model.as_deref().unwrap_or_default())?;
     usage::record(&db, &agent_id, account_id.as_deref(), model.as_deref(), &turn).await
 }
 
@@ -578,6 +614,7 @@ pub async fn usage_record(
 /// so a 2 GB log becomes a bounded preview rather than a 2 GB IPC message.
 #[tauri::command]
 pub async fn file_ingest(path: String) -> Result<ingest::IngestedFile, String> {
+    validate_len("file path", &path)?;
     tokio::task::spawn_blocking(move || ingest::ingest(&path))
         .await
         .map_err(|e| e.to_string())?
@@ -586,6 +623,7 @@ pub async fn file_ingest(path: String) -> Result<ingest::IngestedFile, String> {
 /// Open a file in the user's editor. Returns the command that ran.
 #[tauri::command]
 pub async fn file_open_in_editor(path: String) -> Result<String, String> {
+    validate_len("file path", &path)?;
     tokio::task::spawn_blocking(move || open::open_in_editor(&path))
         .await
         .map_err(|e| e.to_string())?
@@ -594,6 +632,7 @@ pub async fn file_open_in_editor(path: String) -> Result<String, String> {
 /// Write text to a path the user chose — the transcript's "save code block".
 #[tauri::command]
 pub async fn file_save(path: String, contents: String) -> Result<String, String> {
+    validate_len("file path", &path)?;
     if contents.len() > MAX_PROMPT_BYTES {
         return Err("that is too large to save from the transcript".into());
     }
@@ -623,6 +662,7 @@ pub async fn sessions_search(
     query: String,
     limit: Option<u32>,
 ) -> Result<Vec<sessions::SearchHit>, String> {
+    validate_len("search query", &query)?;
     sessions::search(&db, &query, limit.unwrap_or(100)).await
 }
 
@@ -639,6 +679,8 @@ pub async fn file_ingest_bytes(
     media_type: Option<String>,
 ) -> Result<ingest::IngestedFile, String> {
     use base64::Engine;
+    validate_len("file name", &name)?;
+    validate_len("media type", media_type.as_deref().unwrap_or_default())?;
     if data.len() > MAX_INGEST_BASE64 {
         return Err("that is too large to attach".into());
     }
@@ -650,4 +692,52 @@ pub async fn file_ingest_bytes(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/* ---------------- settings (Phase 6) ---------------- */
+
+/// The user's settings, defaults included.
+#[tauri::command]
+pub async fn settings_get(settings: State<'_, Arc<SettingsStore>>) -> Result<Settings, String> {
+    Ok(settings.get().await)
+}
+
+/// Replace the settings and persist them.
+///
+/// Returns what was actually stored: the store clamps anything that would
+/// break the UI if taken literally, and the frontend renders the result rather
+/// than what it asked for.
+#[tauri::command]
+pub async fn settings_set(
+    settings: State<'_, Arc<SettingsStore>>,
+    value: Settings,
+) -> Result<Settings, String> {
+    settings.set(value).await
+}
+
+/* ---------------- version (Phase 6) ---------------- */
+
+/// Where releases are published. Kora does not update itself in v1.
+const RELEASES_URL: &str = "https://github.com/faithdevs/kora/releases";
+
+/// What `/version` and `/update` report.
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionInfo {
+    pub version: String,
+    /// Target triple this build runs on.
+    pub platform: String,
+    /// Where to look for a newer one.
+    pub releases_url: String,
+    /// Whether this build can update itself. It cannot, and says so.
+    pub self_update: bool,
+}
+
+#[tauri::command]
+pub fn version_info() -> VersionInfo {
+    VersionInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: std::env::consts::OS.to_string(),
+        releases_url: RELEASES_URL.to_string(),
+        self_update: false,
+    }
 }

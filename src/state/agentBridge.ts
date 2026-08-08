@@ -11,6 +11,7 @@ import type {
   AccountIdentity,
   PermissionDecision,
   PermissionScope,
+  Settings,
   UsageTotals,
 } from '../types/agent';
 
@@ -106,6 +107,15 @@ export interface IngestedFile {
 export type WireAttachment =
   | { kind: 'text'; name: string; path: string; text: string; truncated: boolean }
   | { kind: 'image'; name: string; media_type: string; data: string };
+
+/** Mirrors `VersionInfo` in `src-tauri/src/commands.rs`. */
+export interface VersionInfo {
+  version: string;
+  platform: string;
+  releases_url: string;
+  /** False in v1: Kora points at releases rather than updating itself. */
+  self_update: boolean;
+}
 
 /** Mirrors `SearchHit` in `src-tauri/src/store/sessions.rs`. */
 export interface SearchHit {
@@ -204,6 +214,13 @@ export interface AgentBridge {
   agentCapabilities(agentId: string): Promise<Capability[]>;
   /** Search every saved transcript. In-session search never leaves the UI. */
   sessionsSearch(query: string, limit?: number): Promise<SearchHit[]>;
+
+  /* ---- settings & version (Phase 6) ---- */
+
+  settingsGet(): Promise<Settings>;
+  /** Returns what was stored, which may differ from what was asked for. */
+  settingsSet(value: Settings): Promise<Settings>;
+  versionInfo(): Promise<VersionInfo>;
 
   usageWeek(accountId: string | null): Promise<UsageTotals>;
   usageRecord(input: {
@@ -374,6 +391,16 @@ export const tauriBridge: AgentBridge = {
     return call<SearchHit[]>('sessions_search', { query, limit: limit ?? null });
   },
 
+  async settingsGet() {
+    return call<Settings>('settings_get');
+  },
+  async settingsSet(value) {
+    return call<Settings>('settings_set', { value });
+  },
+  async versionInfo() {
+    return call<VersionInfo>('version_info');
+  },
+
   async usageWeek(accountId) {
     return call<UsageTotals>('usage_week', { accountId });
   },
@@ -383,6 +410,20 @@ export const tauriBridge: AgentBridge = {
 };
 
 const DESKTOP_ONLY = 'That needs the Kora desktop app — this is a browser preview.';
+
+/** Settings for a browser preview: real enough to use, gone when the tab is. */
+let previewSettings: Settings = {
+  theme: 'kora-dark',
+  fontSize: 13,
+  fontFamily: '',
+  density: 'comfortable',
+  glow: true,
+  statusBar: true,
+  defaultAgent: 'claude',
+  defaultModel: null,
+  autoCompact: false,
+  notifications: { context: true, usage: true, auth: true, errors: true, updates: true },
+};
 
 /**
  * Stand-in used when Kora runs outside Tauri (browser preview, tests).
@@ -461,6 +502,19 @@ export const offlineBridge: AgentBridge = {
   },
   agentCapabilities: async () => [],
   sessionsSearch: async () => [],
+
+  // A browser preview keeps settings for the session only, in memory.
+  settingsGet: async () => previewSettings,
+  settingsSet: async (value) => {
+    previewSettings = value;
+    return value;
+  },
+  versionInfo: async () => ({
+    version: '0.0.0-preview',
+    platform: 'browser',
+    releases_url: 'https://github.com/faithdevs/kora/releases',
+    self_update: false,
+  }),
 
   usageWeek: async () => ({
     input_tokens: 0,

@@ -11,6 +11,8 @@ import type {
   Model,
   NewLine,
   Session,
+  Settings,
+  Toast,
   TranscriptLine,
   UsageTotals,
 } from '../types/agent';
@@ -47,6 +49,35 @@ export interface AppState {
   accounts: Account[];
   /** Kora's own rolling seven-day record, keyed by account id. */
   week: Record<string, UsageTotals>;
+
+  /* ---- Phase 6 ---- */
+
+  /** User settings, loaded from the backend on start. */
+  settings: Settings;
+  /** Notifications currently on screen, newest last. */
+  toasts: Toast[];
+  /** Whether the global command palette is open. */
+  paletteOpen: boolean;
+  /** Whether the settings panel is open. */
+  settingsOpen: boolean;
+  /** Running version, read from the backend on start. */
+  version: string;
+}
+
+/** Kora's shipped defaults, mirroring `Settings::default()` in Rust. */
+export function defaultSettings(): Settings {
+  return {
+    theme: 'kora-dark',
+    fontSize: 13,
+    fontFamily: '',
+    density: 'comfortable',
+    glow: true,
+    statusBar: true,
+    defaultAgent: 'claude',
+    defaultModel: null,
+    autoCompact: false,
+    notifications: { context: true, usage: true, auth: true, errors: true, updates: true },
+  };
 }
 
 /* ---------------- id generation ---------------- */
@@ -55,6 +86,7 @@ let sid = 0;
 let pid = 4820;
 let lineKey = 0;
 let attKey = 0;
+let toastKey = 0;
 
 /** Test-only: makes id sequences deterministic across cases. */
 export function __resetIds(): void {
@@ -62,6 +94,7 @@ export function __resetIds(): void {
   pid = 4820;
   lineKey = 0;
   attKey = 0;
+  toastKey = 0;
 }
 
 /**
@@ -84,6 +117,10 @@ export function nextLineKey(): string {
 
 export function nextAttachmentId(): string {
   return 'a' + ++attKey;
+}
+
+export function nextToastId(): string {
+  return 'n' + ++toastKey;
 }
 
 /* ---------------- lookups ---------------- */
@@ -216,6 +253,11 @@ export function initialState(): AppState {
     sessions: [s1],
     accounts: [],
     week: {},
+    settings: defaultSettings(),
+    toasts: [],
+    paletteOpen: false,
+    settingsOpen: false,
+    version: '',
     focusedId: s1.id,
     splitOn: false,
     input: '',

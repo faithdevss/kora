@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { highlightCode } from '../../state/markdown';
+import { loadMarkdown, loadedMarkdown } from '../../state/markdownLazy';
 import { DiffViewer, looksLikeDiff } from './DiffViewer';
 
 export interface CodeActions {
@@ -56,8 +56,25 @@ export function CodeBlock({ block, lang, path, actions }: Props) {
   const [copied, setCopied] = useState(false);
   const isDiff = looksLikeDiff(block, lang);
 
+  // Highlighting comes from the lazily-loaded renderer; until it lands the code
+  // is shown as plain text rather than not at all.
   useEffect(() => {
-    if (ref.current && !isDiff) ref.current.innerHTML = highlightCode(block, lang);
+    const host = ref.current;
+    if (!host || isDiff) return;
+    let cancelled = false;
+
+    const apply = (md: NonNullable<ReturnType<typeof loadedMarkdown>>) => {
+      if (!cancelled) host.innerHTML = md.highlightCode(block, lang);
+    };
+    const ready = loadedMarkdown();
+    if (ready) apply(ready);
+    else {
+      host.textContent = block;
+      void loadMarkdown().then(apply);
+    }
+    return () => {
+      cancelled = true;
+    };
   }, [block, lang, isDiff]);
 
   useEffect(() => {

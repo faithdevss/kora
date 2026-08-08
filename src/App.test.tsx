@@ -514,3 +514,109 @@ describe('attachments', () => {
     expect(screen.getByText(/only the first 64 KB/)).toBeTruthy();
   });
 });
+
+describe('phase 6 — palette, settings, notifications', () => {
+  beforeEach(boot);
+
+  /** The Mod key on the platform the tests run as (jsdom reports non-mac). */
+  const MOD = { ctrlKey: true };
+
+  it('the palette opens from anywhere, including while typing in the input', async () => {
+    await act(async () => {
+      fireEvent.keyDown(input(), { key: 'P', ...MOD, shiftKey: true });
+    });
+    expect(screen.getByPlaceholderText(/Commands, agents, models/)).toBeTruthy();
+  });
+
+  it('the palette finds a command and runs it', async () => {
+    await act(async () => {
+      fireEvent.keyDown(window, { key: 'P', ...MOD, shiftKey: true });
+    });
+    const box = screen.getByPlaceholderText(/Commands, agents, models/);
+    await act(async () => {
+      fireEvent.change(box, { target: { value: '/statistics' } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(box, { key: 'Enter' });
+    });
+
+    expect(screen.getByText('session statistics')).toBeTruthy();
+    expect(screen.queryByPlaceholderText(/Commands, agents, models/)).toBeNull();
+  });
+
+  it('the palette closes on Escape without running anything', async () => {
+    await act(async () => {
+      fireEvent.keyDown(window, { key: 'P', ...MOD, shiftKey: true });
+    });
+    const box = screen.getByPlaceholderText(/Commands, agents, models/);
+    await act(async () => {
+      fireEvent.keyDown(box, { key: 'Escape' });
+    });
+    expect(screen.queryByPlaceholderText(/Commands, agents, models/)).toBeNull();
+  });
+
+  it('the palette lists sessions and switching focuses one', async () => {
+    await act(async () => {
+      store.newTab();
+    });
+    const [first] = store.getState().sessions.map((s) => s.id);
+    await act(async () => {
+      store.focusPane(store.getState().sessions[1].id);
+      fireEvent.keyDown(window, { key: 'P', ...MOD, shiftKey: true });
+    });
+
+    const items = screen.getAllByText('claude');
+    await act(async () => {
+      fireEvent.click(items[0]);
+    });
+    expect(store.getState().focusedId).toBe(first);
+  });
+
+  it('opens settings from the keyboard, and a toggle reaches the backend', async () => {
+    await act(async () => {
+      fireEvent.keyDown(window, { key: ',', ...MOD });
+    });
+    expect(screen.getByLabelText('Settings')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('accent glow').closest('label')!.querySelector('button')!);
+    });
+    expect(bridge.settings.glow).toBe(false);
+  });
+
+  it('turning the status bar off removes it', async () => {
+    expect(document.querySelector('.k-statusbar')).toBeTruthy();
+    await act(async () => {
+      await store.updateSettings({ statusBar: false });
+    });
+    expect(document.querySelector('.k-statusbar')).toBeNull();
+  });
+
+  it('a context notification appears without the user opening /usage', async () => {
+    await act(async () => {
+      await emit(sid(), {
+        kind: 'turn_end',
+        text: '',
+        is_error: false,
+        usage: {
+          input_tokens: 195000,
+          output_tokens: 500,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+          total_cost_usd: null,
+          context_window: 200000,
+        },
+      });
+    });
+
+    const toast = document.querySelector('.k-toast');
+    expect(toast).toBeTruthy();
+    expect(toast!.textContent).toContain('Context is');
+
+    // Its action runs the agent's own command.
+    await act(async () => {
+      fireEvent.click(toast!.querySelector('.k-toast-action') as HTMLElement);
+    });
+    expect(bridge.writes.some(([, text]) => text === '/compact')).toBe(true);
+  });
+});

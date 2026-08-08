@@ -8,7 +8,9 @@ pub mod accounts;
 pub mod adapters;
 pub mod commands;
 pub mod files;
+pub mod integrations;
 pub mod proc;
+pub mod settings;
 pub mod store;
 
 use std::sync::Arc;
@@ -16,13 +18,24 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, RunEvent};
 
 use accounts::store::AccountStore;
+use settings::config::SettingsStore;
 use proc::manager::{SessionEvent, SessionManager, EVENT_NAME};
 use store::Db;
 
+/// Prints how long the window took to appear, when `KORA_TIMING=1`.
+///
+/// Startup is measured, not asserted: the docs' aspirational "<100ms" belongs
+/// to a pure-TUI stack, and the honest thing is to publish what this one does.
+fn report_timing(label: &str, since: std::time::Instant) {
+    if std::env::var("KORA_TIMING").is_ok_and(|v| v == "1") {
+        eprintln!("kora-timing {label}: {}ms", since.elapsed().as_millis());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run(started: std::time::Instant) {
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             // Every agent event reaches the frontend through this one channel.
             let handle = app.handle().clone();
             let manager = Arc::new(SessionManager::new(Arc::new(move |event: SessionEvent| {
@@ -42,6 +55,8 @@ pub fn run() {
                 }
             }
             app.manage(Arc::new(AccountStore::new(&root)));
+            app.manage(Arc::new(SettingsStore::new(&root)));
+            report_timing("setup", started);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -79,10 +94,16 @@ pub fn run() {
             commands::file_open_in_editor,
             commands::file_save,
             commands::agent_capabilities,
+            commands::settings_get,
+            commands::settings_set,
+            commands::version_info,
         ])
         .build(tauri::generate_context!())
         .expect("error while building kora")
-        .run(|app, event| {
+        .run(move |app, event| {
+            if let RunEvent::Ready = event {
+                report_timing("window-ready", started);
+            }
             // Quitting must not leave agent processes behind.
             if let RunEvent::Exit = event {
                 if let Some(manager) = app.try_state::<Arc<SessionManager>>() {

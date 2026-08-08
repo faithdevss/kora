@@ -4,10 +4,14 @@
  * The HTML comes from `state/markdown.ts`, which sanitizes it; this component
  * adds nothing to it but search highlighting, which it applies to text nodes of
  * the already-sanitized tree.
+ *
+ * The renderer is loaded on first use rather than at startup (see
+ * `state/markdownLazy.ts`). Until it arrives the text is mounted as a text
+ * node, which is readable and cannot be markup by construction.
  */
 
-import { useEffect, useRef } from 'react';
-import { markMatches, renderMarkdown } from '../../state/markdown';
+import { useEffect, useRef, useState } from 'react';
+import { loadMarkdown, loadedMarkdown } from '../../state/markdownLazy';
 
 interface Props {
   text: string;
@@ -17,13 +21,31 @@ interface Props {
 
 export function Markdown({ text, query }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  // Bumped when the renderer arrives, so the placeholder is replaced.
+  const [loaded, setLoaded] = useState(() => loadedMarkdown() !== null);
 
   useEffect(() => {
+    let cancelled = false;
     const host = ref.current;
     if (!host) return;
-    host.innerHTML = renderMarkdown(text);
-    if (query) markMatches(host, query);
-  }, [text, query]);
+
+    const md = loadedMarkdown();
+    if (md) {
+      host.innerHTML = md.renderMarkdown(text);
+      if (query) md.markMatches(host, query);
+      return;
+    }
+
+    // First response of the session: show the text, then upgrade it in place.
+    host.textContent = '';
+    host.append(document.createTextNode(text));
+    void loadMarkdown().then(() => {
+      if (!cancelled) setLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [text, query, loaded]);
 
   return <div className="k-md" ref={ref} />;
 }

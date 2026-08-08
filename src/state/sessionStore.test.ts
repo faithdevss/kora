@@ -1079,3 +1079,211 @@ describe('cross-session search', () => {
     expect(store.getState().searchAll).toEqual([]);
   });
 });
+
+describe('settings', () => {
+  it('loads persisted settings on start, including the UI ones', async () => {
+    bridge.settings = { ...bridge.settings, density: 'compact', glow: false, fontSize: 15 };
+    await boot();
+
+    expect(store.getState().settings.fontSize).toBe(15);
+    // Density and glow also drive top-level UI state, so they must agree.
+    expect(store.getState().density).toBe('compact');
+    expect(store.getState().glow).toBe(false);
+  });
+
+  it('persists a change and survives a restart', async () => {
+    await boot();
+    await store.updateSettings({ autoCompact: true, statusBar: false });
+
+    expect(bridge.settings.autoCompact).toBe(true);
+    __resetIds();
+    const next = new SessionStore(initialState(), mockDataSource, bridge);
+    await next.start();
+    expect(next.getState().settings.autoCompact).toBe(true);
+    expect(next.getState().settings.statusBar).toBe(false);
+    await next.dispose();
+  });
+
+  it('renders what the backend stored, not what was asked for', async () => {
+    await boot();
+    // The backend clamps; the UI must not keep showing the impossible value.
+    await store.updateSettings({ fontSize: 400 });
+    expect(store.getState().settings.fontSize).toBe(24);
+  });
+
+  it('falls back to defaults when settings cannot be read', async () => {
+    bridge.settingsGet = async () => {
+      throw new Error('no store');
+    };
+    await boot();
+    expect(store.getState().settings.theme).toBe('kora-dark');
+  });
+});
+
+describe('notifications', () => {
+  /** Ends a turn at a given fraction of a 200k window. */
+  function fill(pct: number): void {
+    bridge.emit(store.getState().focusedId, {
+      kind: 'turn_end',
+      text: '',
+      usage: usage({
+        input_tokens: Math.round(200000 * pct) - 500,
+        output_tokens: 500,
+        context_window: 200000,
+      }),
+      is_error: false,
+    });
+  }
+
+  it('fires when context crosses the urgent threshold, without opening /usage', async () => {
+    await boot();
+    fill(0.95);
+
+    const [toast] = store.getState().toasts;
+    expect(toast.kind).toBe('context');
+    expect(toast.text).toContain('%');
+    expect(toast.action?.cmd).toBe('/compact');
+  });
+
+  it('never quotes the conversation, since it can be read on a locked screen', async () => {
+    await boot();
+    store.setInput('my secret production database password is hunter2');
+    store.submit();
+    await Promise.resolve();
+    fill(0.95);
+
+    for (const toast of store.getState().toasts) {
+      expect(toast.text).not.toContain('hunter2');
+      expect(toast.text).not.toContain('password');
+    }
+  });
+
+  it('warns once per condition rather than on every turn', async () => {
+    await boot();
+    fill(0.95);
+    fill(0.96);
+    fill(0.97);
+    expect(store.getState().toasts.filter((t) => t.kind === 'context')).toHaveLength(1);
+  });
+
+  it('stays silent for a kind the user switched off', async () => {
+    bridge.settings = {
+      ...bridge.settings,
+      notifications: { ...bridge.settings.notifications, context: false },
+    };
+    await boot();
+    fill(0.95);
+    expect(store.getState().toasts).toHaveLength(0);
+  });
+
+  it('reports a failed turn, and a sign-in problem as its own kind', async () => {
+    await boot();
+    bridge.emit(store.getState().focusedId, { kind: 'error', message: 'network went away' });
+    expect(store.getState().toasts.at(-1)?.kind).toBe('errors');
+
+    store.dismissToast(store.getState().toasts.at(-1)!.id);
+    bridge.emit(store.getState().focusedId, { kind: 'error', message: '401 Unauthorized' });
+    expect(store.getState().toasts.at(-1)?.kind).toBe('auth');
+  });
+
+  it('can be dismissed, and then the same condition can warn again', async () => {
+    await boot();
+    fill(0.95);
+    const id = store.getState().toasts[0].id;
+    store.dismissToast(id);
+    expect(store.getState().toasts).toHaveLength(0);
+
+    fill(0.96);
+    expect(store.getState().toasts).toHaveLength(1);
+  });
+
+  describe('auto-compact', () => {
+    it('is off by default: the user is asked, not acted upon', async () => {
+      await boot();
+      fill(0.95);
+      expect(bridge.writes.some(([, text]) => text === '/compact')).toBe(false);
+      expect(store.getState().toasts).toHaveLength(1);
+    });
+
+    it('when on, asks the agent to compact instead of notifying', async () => {
+      bridge.settings = { ...bridge.settings, autoCompact: true };
+      await boot();
+      fill(0.95);
+      await Promise.resolve();
+
+      expect(bridge.writes.some(([, text]) => text === '/compact')).toBe(true);
+      expect(store.getState().toasts).toHaveLength(0);
+    });
+  });
+});
+
+describe('keyboard actions', () => {
+  beforeEach(boot);
+
+  it('opens and closes the palette', () => {
+    store.runAction('palette');
+    expect(store.getState().paletteOpen).toBe(true);
+    store.runAction('palette');
+    expect(store.getState().paletteOpen).toBe(false);
+  });
+
+  it('opens settings, and closing returns focus to the input', () => {
+    const before = store.getState().focusNonce;
+    store.runAction('settings');
+    expect(store.getState().settingsOpen).toBe(true);
+    store.closeSettings();
+    expect(store.getState().settingsOpen).toBe(false);
+    expect(store.getState().focusNonce).toBe(before + 1);
+  });
+
+  it('sends /clear to the agent rather than clearing the transcript itself', async () => {
+    store.runAction('clear');
+    await Promise.resolve();
+    expect(bridge.writes.at(-1)?.[1]).toBe('/clear');
+  });
+
+  it('cycles tabs in both directions, wrapping', async () => {
+    store.newTab();
+    await Promise.resolve();
+    const [first, second] = store.getState().sessions.map((s) => s.id);
+
+    store.focusPane(first);
+    store.runAction('nextTab');
+    expect(store.getState().focusedId).toBe(second);
+    store.runAction('nextTab');
+    expect(store.getState().focusedId).toBe(first);
+    store.runAction('prevTab');
+    expect(store.getState().focusedId).toBe(second);
+  });
+
+  it('opens and closes split view', () => {
+    store.runAction('split');
+    expect(store.getState().splitOn).toBe(true);
+  });
+
+  it('interrupts the agent', async () => {
+    store.runAction('interrupt');
+    await Promise.resolve();
+    expect(bridge.interrupts).toContain(store.getState().focusedId);
+  });
+});
+
+describe('version', () => {
+  it('/version reports the build and says it does not self-update', async () => {
+    await boot();
+    store.runQuick('/version');
+    await settle();
+
+    const text = (last() as { text: string }).text;
+    expect(text).toContain('Kora 0.1.0');
+    expect(text).toContain('does not update itself');
+    expect(text).toContain('releases');
+  });
+
+  it('/update says the same thing, rather than pretending to update', async () => {
+    await boot();
+    store.runQuick('/update');
+    await settle();
+    expect((last() as { text: string }).text).toContain('releases');
+  });
+});

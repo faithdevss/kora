@@ -17,6 +17,7 @@ import {
   mkSession,
   modelOf,
   nextAttachmentId,
+  nextToastId,
   pushLine,
   reserveSessionIds,
   sessionById,
@@ -37,7 +38,9 @@ import {
 } from './commandRouter';
 import { accountSubtitle } from './accounts';
 import { fmt } from './format';
+import type { ActionId } from './keymap';
 import { findMatches, wrapIndex, type SearchMode } from './search';
+import { CTX_URGENT } from './format';
 import { mockDataSource, type DataSource } from './mockFixtures';
 import {
   defaultBridge,
@@ -57,6 +60,8 @@ import type {
   ListKind,
   PermissionDecision,
   Session,
+  Settings,
+  Toast,
   TranscriptLine,
 } from '../types/agent';
 
@@ -69,6 +74,9 @@ type Listener = () => void;
  * of old conversations out of the tab bar — `/session list` reaches the rest.
  */
 const MAX_RESTORED_TABS = 8;
+
+/** How long a notification stays on screen. */
+const TOAST_MS = 8000;
 
 /** What `/session` on its own explains. */
 const SESSION_HELP = [
@@ -105,6 +113,10 @@ export class SessionStore {
   private restoring = false;
   /** What each agent can do, asked once per agent (`vision` gates images). */
   private capabilities = new Map<string, Capability[]>();
+  /** Auto-dismiss timers, one per visible notification. */
+  private toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** `kind:session` for notifications on screen, so a condition warns once. */
+  private liveToasts = new Set<string>();
 
   constructor(
     initial: AppState = initialState(),
@@ -159,6 +171,7 @@ export class SessionStore {
     } catch {
       this.cwd = null;
     }
+    await this.loadSettings();
     await this.loadAccounts();
     await this.restoreSessions();
     await this.ensureAgent(this.state.focusedId);
@@ -167,6 +180,8 @@ export class SessionStore {
   /** Stops listening and kills every agent process. */
   dispose = async (): Promise<void> => {
     this.disposed = true;
+    for (const timer of this.toastTimers.values()) clearTimeout(timer);
+    this.toastTimers.clear();
     this.unsubscribe?.();
     this.unsubscribe = null;
     const ids = this.state.sessions.map((s) => s.id);
@@ -175,6 +190,21 @@ export class SessionStore {
     await Promise.all(ids.map((id) => this.flushSave(id)));
     await Promise.all(ids.map((id) => this.bridge.kill(id).catch(() => {})));
   };
+
+  /** Reads persisted settings, falling back to defaults if the store is gone. */
+  private async loadSettings(): Promise<void> {
+    try {
+      this.set(this.withSettings(this.state, await this.bridge.settingsGet()));
+    } catch {
+      /* defaults are already in state; a missing settings file is not an error */
+    }
+    try {
+      const info = await this.bridge.versionInfo();
+      this.set({ ...this.state, version: info.version });
+    } catch {
+      /* the version is decoration until /version is asked for */
+    }
+  }
 
   /* ---- accounts ---- */
 
@@ -537,6 +567,14 @@ export class SessionStore {
             text: event.message,
           }),
         );
+        // Named, not quoted: the message can carry prompt fragments.
+        this.notify({
+          kind: this.looksLikeAuth(event.message) ? 'auth' : 'errors',
+          text: this.looksLikeAuth(event.message)
+            ? `"${sessionById(this.state, sessionId)?.name}" is no longer signed in.`
+            : `A turn failed in "${sessionById(this.state, sessionId)?.name}".`,
+          sessionId,
+        });
         break;
 
       case 'exited':
@@ -667,7 +705,55 @@ export class SessionStore {
     }
 
     this.set(checkContext(next, sessionId));
+    this.afterMeasurement(sessionId);
     if (usage) void this.recordUsage(sessionId, usage);
+  }
+
+  /**
+   * What happens when a turn tells us how full the context really is.
+   *
+   * The notification fires here rather than from the `/usage` panel, so a user
+   * who never opens it still finds out (phase-6 acceptance criterion 3), and
+   * auto-compact — off by default — asks the *agent* to compact rather than
+   * doing anything to the conversation itself.
+   */
+  private afterMeasurement(sessionId: string): void {
+    const s = sessionById(this.state, sessionId);
+    if (!s || s.ctxWin <= 0) return;
+    const pct = s.ctxUsed / s.ctxWin;
+
+    if (pct >= CTX_URGENT) {
+      if (this.state.settings.autoCompact && s.status === 'idle') {
+        this.set(
+          pushLine(this.state, sessionId, {
+            t: 'dim',
+            text: 'Context is over 90% — asking the agent to compact (auto-compact is on).',
+          }),
+        );
+        void this.sendToAgent(sessionId, '/compact');
+      } else {
+        this.notify({
+          kind: 'context',
+          // Names the session and the condition. No conversation content: this
+          // can surface on a locked screen.
+          text: `Context is ${Math.round(pct * 100)}% full in "${s.name}".`,
+          sessionId,
+          action: { label: '/compact', cmd: '/compact' },
+        });
+      }
+    }
+
+    const quota = s.rateLimit;
+    if (quota && quota.utilization >= 0.9) {
+      this.notify({
+        kind: 'usage',
+        text: `${quota.window.replace('_', '-')} usage is at ${Math.round(
+          quota.utilization * 100,
+        )}% on "${s.name}".`,
+        sessionId,
+        action: { label: '/accounts', cmd: '/accounts' },
+      });
+    }
   }
 
   /**
@@ -850,7 +936,52 @@ export class SessionStore {
       void this.runSessionCommand(sessionId, args);
       return true;
     }
+    if (cmd === '/settings') {
+      this.set(pushLine(state, sessionId, { t: 'cmd', text: raw }));
+      this.openSettings();
+      return true;
+    }
+    if (cmd === '/theme') {
+      this.set(pushLine(state, sessionId, { t: 'cmd', text: raw }));
+      void this.setTheme(sessionId, args.join(' ').trim());
+      return true;
+    }
+    if (cmd === '/version' || cmd === '/update') {
+      this.set(pushLine(state, sessionId, { t: 'cmd', text: raw }));
+      void this.showVersion(sessionId);
+      return true;
+    }
     return false;
+  }
+
+  /**
+   * Switches theme, or lists what there is.
+   *
+   * One theme ships; the command exists because the setting does, and saying
+   * "that is the only one" is more useful than pretending otherwise.
+   */
+  private async setTheme(sessionId: string, name: string): Promise<void> {
+    const themes = ['kora-dark'];
+    if (!name) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'out',
+          text: `Themes: ${themes.join(', ')} (current: ${this.state.settings.theme})`,
+        }),
+      );
+      return;
+    }
+    if (!themes.includes(name)) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: `No theme called "${name}". This build ships ${themes.join(', ')}.`,
+        }),
+      );
+      return;
+    }
+    await this.updateSettings({ theme: name });
+    this.set(pushLine(this.state, sessionId, { t: 'ok', text: `Theme → ${name}.` }));
   }
 
   /* ---- /accounts ---- */
@@ -1742,6 +1873,217 @@ export class SessionStore {
   };
 
   workspace = (): string => this.state.sessions[0]?.cwd ?? this.cwd ?? this.data.workspace();
+
+  /* ---- settings ---- */
+
+  /** Applies a settings change and persists it, rendering what was stored. */
+  updateSettings = async (patch: Partial<Settings>): Promise<void> => {
+    const merged = { ...this.state.settings, ...patch };
+    // Optimistic, so the UI does not lag a checkbox; corrected below if the
+    // backend clamped anything.
+    this.set(this.withSettings(this.state, merged));
+    try {
+      const stored = await this.bridge.settingsSet(merged);
+      this.set(this.withSettings(this.state, stored));
+    } catch (e) {
+      this.set(
+        pushLine(this.state, this.state.focusedId, {
+          t: 'err',
+          text: `Settings could not be saved: ${e instanceof Error ? e.message : String(e)}`,
+        }),
+      );
+    }
+  };
+
+  /** Mirrors the settings that also live as top-level UI state. */
+  private withSettings(state: AppState, settings: Settings): AppState {
+    return { ...state, settings, density: settings.density, glow: settings.glow };
+  }
+
+  openSettings = (): void => {
+    this.set({ ...this.state, settingsOpen: true, paletteOpen: false });
+  };
+
+  closeSettings = (): void => {
+    this.set({
+      ...this.state,
+      settingsOpen: false,
+      focusNonce: this.state.focusNonce + 1,
+    });
+  };
+
+  /* ---- command palette ---- */
+
+  togglePalette = (): void => {
+    this.set({ ...this.state, paletteOpen: !this.state.paletteOpen });
+  };
+
+  closePalette = (): void => {
+    this.set({
+      ...this.state,
+      paletteOpen: false,
+      focusNonce: this.state.focusNonce + 1,
+    });
+  };
+
+  /* ---- notifications ---- */
+
+  /**
+   * Raises a notification.
+   *
+   * The text must be safe to read on a locked screen: it names the session and
+   * the condition, never a line of the conversation (phase-6 Security). Kinds
+   * the user has switched off never reach the screen at all.
+   */
+  notify = (toast: Omit<Toast, 'id'>): void => {
+    if (!this.state.settings.notifications[toast.kind]) return;
+    // One live notification per kind per session: a condition that persists
+    // across turns should not stack up.
+    const key = `${toast.kind}:${toast.sessionId ?? ''}`;
+    if (this.liveToasts.has(key)) return;
+    this.liveToasts.add(key);
+
+    const id = nextToastId();
+    this.set({ ...this.state, toasts: [...this.state.toasts, { ...toast, id }] });
+    this.toastTimers.set(
+      id,
+      setTimeout(() => this.dismissToast(id), TOAST_MS),
+    );
+  };
+
+  dismissToast = (id: string): void => {
+    const timer = this.toastTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.toastTimers.delete(id);
+
+    const toast = this.state.toasts.find((t) => t.id === id);
+    if (toast) this.liveToasts.delete(`${toast.kind}:${toast.sessionId ?? ''}`);
+    this.set({ ...this.state, toasts: this.state.toasts.filter((t) => t.id !== id) });
+  };
+
+  /* ---- version ---- */
+
+  /** Reports the running version, and where a newer one would come from. */
+  showVersion = async (sessionId: string = this.state.focusedId): Promise<void> => {
+    try {
+      const info = await this.bridge.versionInfo();
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'out',
+          text:
+            `Kora ${info.version} (${info.platform})\n` +
+            (info.self_update
+              ? 'Updates install themselves.'
+              : `This build does not update itself — releases are at ${info.releases_url}`),
+        }),
+      );
+    } catch (e) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  };
+
+  /* ---- keyboard ---- */
+
+  /**
+   * Runs one keymap action.
+   *
+   * The bindings live in `state/keymap.ts` and the behaviour lives here, so a
+   * remap changes one table and nothing else.
+   */
+  runAction = (id: ActionId): void => {
+    const sessionId = this.state.focusedId;
+    switch (id) {
+      case 'search':
+        this.toggleSearch();
+        return;
+      case 'palette':
+        this.togglePalette();
+        return;
+      case 'settings':
+        if (this.state.settingsOpen) this.closeSettings();
+        else this.openSettings();
+        return;
+      case 'clear':
+        // The agent's own /clear, like typing it (Phase 4 follows the answer).
+        this.runQuick('/clear', sessionId);
+        return;
+      case 'history':
+        this.historyPrev();
+        return;
+      case 'copy':
+        void this.copyLastResponse(sessionId);
+        return;
+      case 'paste':
+        void this.pasteIntoInput();
+        return;
+      case 'newTab':
+        this.newTab();
+        return;
+      case 'closeTab':
+        this.closeTab(sessionId);
+        return;
+      case 'nextTab':
+        this.cycleTab(1);
+        return;
+      case 'prevTab':
+        this.cycleTab(-1);
+        return;
+      case 'split':
+        this.toggleSplit();
+        return;
+      case 'interrupt':
+        void this.interrupt(sessionId);
+        return;
+      case 'help':
+        this.runQuick('/help', sessionId);
+    }
+  };
+
+  /**
+   * Whether an agent error is really an expired sign-in.
+   *
+   * Matched on the shape of the message because that is all the CLI gives us;
+   * being wrong costs a differently-worded notification, nothing more.
+   */
+  private looksLikeAuth(message: string): boolean {
+    return /auth|unauthor|401|credential|logged out|log in|sign in/i.test(message);
+  }
+
+  private cycleTab(delta: number): void {
+    const { sessions, focusedId } = this.state;
+    if (sessions.length < 2) return;
+    const i = sessions.findIndex((s) => s.id === focusedId);
+    const next = sessions[(i + delta + sessions.length) % sessions.length];
+    this.focusPane(next.id);
+  }
+
+  /** Copies the most recent response, so the keyboard can reach it. */
+  private async copyLastResponse(sessionId: string): Promise<void> {
+    const session = sessionById(this.state, sessionId);
+    const last = [...(session?.lines ?? [])].reverse().find((l) => l.t === 'resp');
+    if (!last || last.t !== 'resp') return;
+    const text = [last.text, last.block].filter(Boolean).join('\n\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      this.set(pushLine(this.state, sessionId, { t: 'dim', text: 'Copied the last response.' }));
+    } catch {
+      /* a denied clipboard is not worth an error line */
+    }
+  }
+
+  private async pasteIntoInput(): Promise<void> {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) this.setInput(this.state.input + text);
+    } catch {
+      /* the OS paste shortcut still works; this is the explicit one */
+    }
+  }
 }
 
 /** Text a line contributes to scrollback search. */

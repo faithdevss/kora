@@ -9,7 +9,13 @@ import { SplitView } from './components/SplitView';
 import { Pane, type PaneActions } from './components/Pane';
 import { SearchOverlay } from './components/SearchOverlay';
 import { paletteMatches } from './components/CommandPalette';
+import { GlobalCommandPalette } from './components/GlobalCommandPalette';
+import { SettingsPanel } from './components/SettingsPanel';
+import { NotificationToasts } from './components/NotificationToast';
 import { findMatches } from './state/search';
+import { bindingFor } from './state/keymap';
+import { AGENTS } from './state/mockFixtures';
+import { modelsOf } from './state/appState';
 
 /** `store` is injectable so tests get a fresh one instead of the app singleton. */
 export default function App({ store = defaultStore }: { store?: SessionStore }) {
@@ -19,6 +25,27 @@ export default function App({ store = defaultStore }: { store?: SessionStore }) 
   // against double-starting, which StrictMode's double-mount would otherwise do.
   useEffect(() => {
     void store.start();
+  }, [store]);
+
+  // One global listener, driven by the keymap table, so every binding works
+  // from anywhere in the app rather than only where a component happens to
+  // listen (docs §21).
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const binding = bindingFor(e);
+      if (!binding) return;
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.isContentEditable === true;
+      if (typing && !binding.inInput) return;
+
+      e.preventDefault();
+      store.runAction(binding.id);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, [store]);
   const focused = focusedSession(state);
   const accent = agentOf(focused).accent;
@@ -56,6 +83,7 @@ export default function App({ store = defaultStore }: { store?: SessionStore }) 
   const currentMatch = matches[state.searchIndex];
 
   const ids = paneIds(state);
+  const settings = state.settings;
 
   return (
     <div
@@ -69,8 +97,15 @@ export default function App({ store = defaultStore }: { store?: SessionStore }) 
           '--ac-soft': accent + '12',
           '--ac-edge': accent + '66',
           '--glow': state.glow ? `0 0 10px ${accent}88` : 'none',
+          // Font settings reach CSS as custom properties; the backend has
+          // already clamped the size and refused anything not name-shaped.
+          '--fs-transcript': `${settings.fontSize}px`,
+          ...(settings.fontFamily
+            ? { '--font-mono': `${settings.fontFamily}, ui-monospace, monospace` }
+            : {}),
         } as React.CSSProperties
       }
+      data-theme={settings.theme}
     >
       <TitleBar
         workspace={store.workspace()}
@@ -87,7 +122,7 @@ export default function App({ store = defaultStore }: { store?: SessionStore }) 
         onNewTab={store.newTab}
       />
 
-      <StatusBar session={focused} onSuggest={store.runQuick} />
+      {settings.statusBar ? <StatusBar session={focused} onSuggest={store.runQuick} /> : null}
 
       <SplitView>
         {ids.map((id) => {
@@ -123,6 +158,37 @@ export default function App({ store = defaultStore }: { store?: SessionStore }) 
           );
         })}
       </SplitView>
+
+      {state.paletteOpen ? (
+        <GlobalCommandPalette
+          state={state}
+          onRun={(cmd) => store.runQuick(cmd)}
+          onOpenSettings={store.openSettings}
+          onFocusSession={store.focusPane}
+          onAction={(id) => store.runAction(id as Parameters<typeof store.runAction>[0])}
+          onClose={store.closePalette}
+        />
+      ) : null}
+
+      {state.settingsOpen ? (
+        <SettingsPanel
+          settings={settings}
+          agents={AGENTS}
+          models={modelsOf(focused)}
+          version={state.version}
+          onChange={(patch) => void store.updateSettings(patch)}
+          onClose={store.closeSettings}
+        />
+      ) : null}
+
+      <NotificationToasts
+        toasts={state.toasts}
+        onAction={(toast) => {
+          store.dismissToast(toast.id);
+          if (toast.action) store.runQuick(toast.action.cmd, toast.sessionId ?? state.focusedId);
+        }}
+        onDismiss={store.dismissToast}
+      />
 
       {state.searchOpen ? (
         <SearchOverlay

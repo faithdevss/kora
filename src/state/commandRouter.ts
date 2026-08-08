@@ -52,6 +52,10 @@ export const KORA_COMMANDS = [
   '/stop',
   '/session',
   '/sessions',
+  '/settings',
+  '/theme',
+  '/version',
+  '/update',
 ];
 
 /**
@@ -443,6 +447,17 @@ export function runCommand(state: AppState, sessionId: string, raw: string): App
 
     case '/statistics':
       return pushLine(next, sessionId, { t: 'panel', kind: 'stats', data: statsData(next, s) });
+
+    // These act on the app rather than the transcript, so the store intercepts
+    // them; reaching the router means it could not.
+    case '/settings':
+    case '/theme':
+    case '/version':
+    case '/update':
+      return pushLine(next, sessionId, {
+        t: 'dim',
+        text: `${cmd} needs the Kora desktop app.`,
+      });
 
     // Every /session verb goes through the local store, so reaching the router
     // means the app is running without one (browser preview).

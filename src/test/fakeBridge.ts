@@ -13,7 +13,7 @@ import type {
   SessionMeta,
   SpawnResult,
 } from '../state/agentBridge';
-import type { Account, PermissionDecision, UsageTotals } from '../types/agent';
+import type { Account, PermissionDecision, Settings, UsageTotals } from '../types/agent';
 import type {
   Capability,
   IngestedFile,
@@ -69,6 +69,27 @@ export interface FakeBridge extends AgentBridge {
   readonly opened: string[];
   /** Puts a file on the fake disk. */
   seedFile(over?: Partial<IngestedFile>): IngestedFile;
+
+  /* ---- Phase 6 ---- */
+
+  /** Settings as the fake backend has them stored. */
+  settings: Settings;
+}
+
+/** Kora's shipped defaults, mirroring `Settings::default()` in Rust. */
+export function defaultSettings(): Settings {
+  return {
+    theme: 'kora-dark',
+    fontSize: 13,
+    fontFamily: '',
+    density: 'comfortable',
+    glow: true,
+    statusBar: true,
+    defaultAgent: 'claude',
+    defaultModel: null,
+    autoCompact: false,
+    notifications: { context: true, usage: true, auth: true, errors: true, updates: true },
+  };
 }
 
 /** A small text file, the shape the Rust ingest layer returns. */
@@ -171,6 +192,7 @@ export function makeFakeBridge(): FakeBridge {
     capabilities: new Map([['claude', ['streaming', 'usage', 'vision'] as Capability[]]]),
     saves: [],
     opened: [],
+    settings: defaultSettings(),
 
     emit(sessionId, event) {
       handlers.forEach((h) => h(sessionId, event));
@@ -427,6 +449,25 @@ export function makeFakeBridge(): FakeBridge {
         });
       }
       return hits;
+    },
+
+    async settingsGet() {
+      return bridge.settings;
+    },
+
+    async settingsSet(value) {
+      // The real store clamps; this mirrors the one rule a test would notice.
+      bridge.settings = { ...value, fontSize: Math.min(Math.max(value.fontSize, 9), 24) };
+      return bridge.settings;
+    },
+
+    async versionInfo() {
+      return {
+        version: '0.1.0',
+        platform: 'darwin',
+        releases_url: 'https://github.com/faithdevs/kora/releases',
+        self_update: false,
+      };
     },
 
     async usageWeek(accountId) {

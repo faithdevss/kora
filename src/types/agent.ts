@@ -422,3 +422,53 @@ export interface Session {
 }
 
 export type Density = 'comfortable' | 'compact';
+
+/* ---------------- settings & notifications (Phase 6) ---------------- */
+
+/** Mirrors `NotificationSettings` in `src-tauri/src/settings/config.rs`. */
+export interface NotificationSettings {
+  context: boolean;
+  usage: boolean;
+  auth: boolean;
+  errors: boolean;
+  updates: boolean;
+}
+
+/**
+ * Mirrors `Settings` in `src-tauri/src/settings/config.rs`.
+ *
+ * The backend clamps anything unreasonable and returns what it stored, so the
+ * UI renders the saved value rather than the requested one.
+ */
+export interface Settings {
+  theme: string;
+  fontSize: number;
+  fontFamily: string;
+  density: Density;
+  glow: boolean;
+  statusBar: boolean;
+  defaultAgent: string;
+  defaultModel: string | null;
+  /** Ask the agent to compact itself at the urgent threshold (Phase 4). */
+  autoCompact: boolean;
+  notifications: NotificationSettings;
+}
+
+export type ToastKind = 'context' | 'usage' | 'auth' | 'errors' | 'updates';
+
+/**
+ * A notification.
+ *
+ * Deliberately carries no conversation content: these can surface while the
+ * screen is locked, so they name the session and the condition, never a quote
+ * from the transcript (phase-6 Security).
+ */
+export interface Toast {
+  id: string;
+  kind: ToastKind;
+  text: string;
+  /** Session it concerns, for the "go there" action. */
+  sessionId?: string;
+  /** A one-click response, e.g. `/compact`. */
+  action?: QuickChip;
+}
