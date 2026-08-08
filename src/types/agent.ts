@@ -198,6 +198,8 @@ export interface RespLine extends LineBase {
   text: string;
   block?: string;
   lang?: string;
+  /** File this block came from, when a tool call named one — enables "open". */
+  path?: string;
   tool?: string;
   /** Tool calls made while producing this response. */
   tools?: string[];
@@ -296,9 +298,31 @@ export type NewLine =
 
 /* ---------------- session ---------------- */
 
+/** What an attachment is, which decides how it travels to the agent. */
+export type AttachmentKind = 'text' | 'image' | 'binary';
+
+/**
+ * One file or image attached to the next prompt.
+ *
+ * Mirrors `IngestedFile` in `src-tauri/src/files/ingest.rs` — the size and
+ * binary policy is enforced there, so this type only carries the result.
+ */
 export interface Attachment {
   id: string;
   name: string;
+  kind: AttachmentKind;
+  /** Absolute path, or empty for something pasted that never hit disk. */
+  path: string;
+  /** Size on disk, before any truncation. */
+  size: number;
+  mediaType: string;
+  /** Text content, already truncated by the backend. */
+  text?: string;
+  /** Base64 image bytes. */
+  data?: string;
+  truncated: boolean;
+  /** Something the user should know before sending, e.g. that it was cut. */
+  note?: string;
 }
 
 /** Whether a session's agent process is up, and what it is doing. */

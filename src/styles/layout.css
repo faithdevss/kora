@@ -403,6 +403,13 @@
   font-size: 13.5px;
   caret-color: var(--ac);
   padding: 0;
+  /* A textarea, so a pasted block keeps its newlines — grown to fit by the
+     component, never by a drag handle. */
+  font-family: inherit;
+  line-height: 1.5;
+  resize: none;
+  overflow-y: auto;
+  max-height: 160px;
 }
 
 .k-input::placeholder {
@@ -439,6 +446,52 @@
   border-radius: 6px;
   font-size: 11px;
   color: #c4cad4;
+  max-width: 260px;
+}
+
+.k-att-thumb {
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 3px;
+  border: 1px solid var(--hairline);
+}
+
+.k-att-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k-att-size {
+  color: var(--dim2);
+}
+
+.k-att-flag {
+  color: var(--amber);
+  font-size: 10px;
+}
+
+/* The picker is driven by the paperclip button, never shown itself. */
+.k-file-input {
+  display: none;
+}
+
+/* A pane accepts a dropped file anywhere on it. */
+.k-pane.is-dropping::after {
+  content: 'drop to attach';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ac-soft);
+  border: 1px dashed var(--ac-edge);
+  border-radius: 10px;
+  color: var(--ac);
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 5;
 }
 
 .k-att-remove {
@@ -512,16 +565,114 @@
   position: absolute;
   top: 70px;
   right: 16px;
-  width: 320px;
+  width: 440px;
+  max-width: calc(100vw - 32px);
   background: var(--panel);
   border: 1px solid var(--hairline);
   border-radius: 10px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
   z-index: 40;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.k-search-row {
+  display: flex;
   align-items: center;
   gap: 9px;
-  padding: 10px 12px;
+}
+
+.k-search-modes {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.k-search-mode {
+  cursor: pointer;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: 10.5px;
+  color: var(--dim2);
+}
+
+.k-search-mode.is-on {
+  color: var(--ac);
+  border-color: var(--ac-edge);
+  background: var(--ac-soft);
+}
+
+.k-search-step,
+.k-search-all {
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--dim2);
+  white-space: nowrap;
+}
+
+.k-search-step:disabled,
+.k-search-all:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.k-search-step:hover:not(:disabled),
+.k-search-all:hover:not(:disabled) {
+  color: var(--ac);
+}
+
+.k-search-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 6px;
+}
+
+.k-search-hit {
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 5px 7px;
+  text-align: left;
+  font-family: inherit;
+}
+
+.k-search-hit:hover {
+  background: var(--ac-soft);
+}
+
+.k-search-hit-name {
+  font-size: 11px;
+  color: var(--ac);
+}
+
+.k-search-hit-snippet {
+  font-size: 11px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The line holding the current match, while stepping through results. */
+.k-line.is-hit {
+  background: var(--ac-soft);
+  border-radius: 5px;
 }
 
 .k-search-input {

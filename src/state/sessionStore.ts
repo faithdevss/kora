@@ -37,16 +37,22 @@ import {
 } from './commandRouter';
 import { accountSubtitle } from './accounts';
 import { fmt } from './format';
+import { findMatches, wrapIndex, type SearchMode } from './search';
 import { mockDataSource, type DataSource } from './mockFixtures';
 import {
   defaultBridge,
   type AgentBridge,
   type AgentEvent,
   type AgentUsage,
+  type Capability,
+  type IngestedFile,
+  type SearchHit,
   type SessionMeta,
+  type WireAttachment,
 } from './agentBridge';
 import type {
   Account,
+  Attachment as AttachmentType,
   Density,
   ListKind,
   PermissionDecision,
@@ -97,6 +103,8 @@ export class SessionStore {
   saveDelay = 400;
   /** True while saved sessions are being read back in, which must not re-save. */
   private restoring = false;
+  /** What each agent can do, asked once per agent (`vision` gates images). */
+  private capabilities = new Map<string, Capability[]>();
 
   constructor(
     initial: AppState = initialState(),
@@ -464,7 +472,7 @@ export class SessionStore {
         break;
 
       case 'tool':
-        this.attachTool(sessionId, event.detail);
+        this.attachTool(sessionId, event.detail, event.path);
         break;
 
       case 'permission':
@@ -567,8 +575,13 @@ export class SessionStore {
     this.set(next);
   }
 
-  /** Records a tool call against the response it belongs to. */
-  private attachTool(sessionId: string, detail: string): void {
+  /**
+   * Records a tool call against the response it belongs to.
+   *
+   * A call that named a file also gives the response a path, which is what
+   * makes "open in editor" on its code block point somewhere real.
+   */
+  private attachTool(sessionId: string, detail: string, path?: string | null): void {
     const session = sessionById(this.state, sessionId)!;
     const hasOpen = session.lines.some((l) => l.key === session.streamKey && l.t === 'resp');
 
@@ -587,7 +600,7 @@ export class SessionStore {
         ...s,
         lines: s.lines.map((l) =>
           l.key === s.streamKey && l.t === 'resp'
-            ? { ...l, tools: [...(l.tools ?? []), detail] }
+            ? { ...l, tools: [...(l.tools ?? []), detail], path: path ?? l.path }
             : l,
         ),
       })),
@@ -1301,7 +1314,8 @@ export class SessionStore {
     const session = sessionById(this.state, sessionId);
     if (!session) return;
 
-    const atts = this.state.attachments.length;
+    const attachments = this.state.attachments;
+    const atts = attachments.length;
     let next: AppState = { ...this.state, attachments: [] };
     next = pushLine(next, sessionId, atts ? { t: 'cmd', text, atts } : { t: 'cmd', text });
 
@@ -1333,7 +1347,7 @@ export class SessionStore {
     this.set(next);
 
     try {
-      await this.bridge.write(sessionId, text);
+      await this.bridge.write(sessionId, text, wireAttachments(attachments));
     } catch (e) {
       this.set(
         pushLine(this.dropThinking(this.state, sessionId), sessionId, {
@@ -1500,28 +1514,204 @@ export class SessionStore {
   };
 
   closeSearch = (): void => {
-    this.set({ ...this.state, searchOpen: false, focusNonce: this.state.focusNonce + 1 });
-  };
-
-  setSearchQuery = (searchQuery: string): void => {
-    this.set({ ...this.state, searchQuery });
-  };
-
-  /* ---- attachments (Phase 5 makes these real files) ---- */
-
-  addAttachment = (name: string): void => {
     this.set({
       ...this.state,
-      attachments: [...this.state.attachments, { id: nextAttachmentId(), name }],
+      searchOpen: false,
+      searchAll: [],
+      focusNonce: this.state.focusNonce + 1,
     });
   };
 
-  addPlaceholderAttachment = (prefix: 'screenshot' | 'pasted'): void => {
-    this.addAttachment(`${prefix}-${this.state.attachments.length + 1}.png`);
+  setSearchQuery = (searchQuery: string): void => {
+    // A changed query invalidates where we were, and any cross-session results.
+    this.set({ ...this.state, searchQuery, searchIndex: 0, searchAll: [] });
+  };
+
+  setSearchMode = (searchMode: SearchMode): void => {
+    this.set({ ...this.state, searchMode, searchIndex: 0 });
+  };
+
+  /** Moves to the next/previous match, wrapping at the ends. */
+  stepSearch = (delta: number): void => {
+    const count = findMatches(
+      focusedSession(this.state),
+      this.state.searchQuery,
+      this.state.searchMode,
+    ).length;
+    if (!count) return;
+    this.set({ ...this.state, searchIndex: wrapIndex(this.state.searchIndex + delta, count) });
+  };
+
+  /**
+   * Widens the search to every saved session.
+   *
+   * The in-session search never leaves the frontend; this one has to ask the
+   * store, because most of what it searches is not open in a tab.
+   */
+  searchAllSessions = async (): Promise<void> => {
+    const query = this.state.searchQuery.trim();
+    if (!query) return;
+    this.set({ ...this.state, searchingAll: true });
+    try {
+      const hits = await this.bridge.sessionsSearch(query, 100);
+      this.set({ ...this.state, searchAll: hits, searchingAll: false });
+    } catch {
+      this.set({ ...this.state, searchAll: [], searchingAll: false });
+    }
+  };
+
+  /** Opens the session a cross-session hit belongs to. */
+  openHit = (hit: SearchHit): void => {
+    this.set({ ...this.state, searchOpen: false, searchAll: [] });
+    void this.runSessionCommand(this.state.focusedId, ['open', hit.session_id]);
+  };
+
+  /* ---- attachments ---- */
+
+  /**
+   * Attaches a file by path — a drag-and-drop, or a path the user typed.
+   *
+   * The backend decides what the file is and how much of it may travel; this
+   * only reports what came back, including a refusal.
+   */
+  attachPath = async (path: string, sessionId: string = this.state.focusedId): Promise<void> => {
+    try {
+      await this.attach(await this.bridge.fileIngest(path), sessionId);
+    } catch (e) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  };
+
+  /**
+   * Attaches bytes with no path: a pasted screenshot, or a file chosen through
+   * the webview's own picker. Classified by the same backend policy.
+   */
+  attachBytes = async (
+    name: string,
+    dataBase64: string,
+    mediaType?: string,
+    sessionId: string = this.state.focusedId,
+  ): Promise<void> => {
+    try {
+      await this.attach(await this.bridge.fileIngestBytes(name, dataBase64, mediaType), sessionId);
+    } catch (e) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  };
+
+  /** Adds an ingested file to the next prompt, refusing what cannot be sent. */
+  private async attach(file: IngestedFile, sessionId: string): Promise<void> {
+    const session = sessionById(this.state, sessionId);
+    if (!session) return;
+
+    // An agent with no vision capability would simply reject the image, so say
+    // so here rather than spending a turn finding out.
+    if (file.kind === 'image' && !(await this.canSeeImages(session.agentId))) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: `${agentOf(session).name} does not accept images, so ${file.name} was not attached.`,
+        }),
+      );
+      return;
+    }
+
+    const attachment: AttachmentType = {
+      id: nextAttachmentId(),
+      name: file.name,
+      kind: file.kind,
+      path: file.path,
+      size: file.size,
+      mediaType: file.media_type,
+      text: file.text ?? undefined,
+      data: file.data ?? undefined,
+      truncated: file.truncated,
+      note: file.note ?? undefined,
+    };
+    this.set({ ...this.state, attachments: [...this.state.attachments, attachment] });
+
+    // A truncation or a binary is worth saying out loud before the turn goes.
+    if (file.note) {
+      this.set(pushLine(this.state, sessionId, { t: 'dim', text: file.note }));
+    }
+  }
+
+  /** Whether this agent accepts images, asked once per agent and cached. */
+  private async canSeeImages(agentId: string): Promise<boolean> {
+    let caps = this.capabilities.get(agentId);
+    if (!caps) {
+      caps = await this.bridge.agentCapabilities(agentId).catch(() => [] as Capability[]);
+      this.capabilities.set(agentId, caps);
+    }
+    return caps.includes('vision');
+  }
+
+  /** Whether the UI should offer image attachment for the focused session. */
+  visionAvailable = (): boolean => {
+    const agentId = focusedSession(this.state).agentId;
+    const caps = this.capabilities.get(agentId);
+    // Unknown until the answer arrives; ask now and assume yes meanwhile, since
+    // `attach` re-checks before anything is actually sent.
+    if (!caps) {
+      void this.canSeeImages(agentId).then(() => this.listeners.forEach((l) => l()));
+      return true;
+    }
+    return caps.includes('vision');
   };
 
   removeAttachment = (id: string): void => {
     this.set({ ...this.state, attachments: this.state.attachments.filter((a) => a.id !== id) });
+  };
+
+  /** Says why something the user offered was not taken. */
+  reject = (sessionId: string, message: string): void => {
+    this.set(pushLine(this.state, sessionId, { t: 'err', text: message }));
+  };
+
+  /* ---- code block actions ---- */
+
+  /** Writes a code block to disk, reporting where it landed. */
+  saveBlock = async (
+    contents: string,
+    path: string,
+    sessionId: string = this.state.focusedId,
+  ): Promise<void> => {
+    try {
+      const written = await this.bridge.fileSave(path, contents);
+      this.set(pushLine(this.state, sessionId, { t: 'ok', text: `Saved to ${written}` }));
+    } catch (e) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  };
+
+  /** Opens a file in the user's own editor. */
+  openInEditor = async (path: string, sessionId: string = this.state.focusedId): Promise<void> => {
+    try {
+      const ran = await this.bridge.fileOpenInEditor(path);
+      this.set(pushLine(this.state, sessionId, { t: 'dim', text: `Opened: ${ran}` }));
+    } catch (e) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
   };
 
   /* ---- list-line clicks ---- */
@@ -1556,7 +1746,34 @@ export class SessionStore {
 
 /** Text a line contributes to scrollback search. */
 export function lineText(l: TranscriptLine): string {
-  return 'text' in l && typeof l.text === 'string' ? l.text : '';
+  const parts: string[] = [];
+  if ('text' in l && typeof l.text === 'string') parts.push(l.text);
+  // A fenced block is part of the conversation, and is exactly the kind of
+  // thing people search for — Phase 1 searched only the prose above it.
+  if (l.t === 'resp' && l.block) parts.push(l.block);
+  if (l.t === 'out' || l.t === 'err') return parts.join('\n');
+  return parts.join('\n');
+}
+
+/**
+ * Attachments in the shape the backend expects.
+ *
+ * A binary is sent as a line of text naming it: the agent can read it with its
+ * own tools, and Kora does not pretend to have decoded something it cannot.
+ */
+export function wireAttachments(attachments: AttachmentType[]): WireAttachment[] {
+  return attachments.map((a) => {
+    if (a.kind === 'image' && a.data) {
+      return { kind: 'image', name: a.name, media_type: a.mediaType, data: a.data };
+    }
+    return {
+      kind: 'text',
+      name: a.name,
+      path: a.path,
+      text: a.text ?? `(binary file, ${a.size} bytes — read it from disk if you need it)`,
+      truncated: a.truncated,
+    };
+  });
 }
 
 export const store = new SessionStore();

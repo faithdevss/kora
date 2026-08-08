@@ -1,8 +1,8 @@
-import { useLayoutEffect, useMemo, useRef } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Attachment, ListKind, PermissionDecision, Session } from '../types/agent';
 import { agentOf } from '../state/appState';
 import { Transcript, type TranscriptActions } from './transcript/Transcript';
-import { CommandInput } from './CommandInput';
+import { CommandInput, readAsBase64 } from './CommandInput';
 
 /** Pane-level callbacks. Every one takes the owning session id so a click in a
  *  blurred split pane acts on that pane, not on whichever pane has focus. */
@@ -15,6 +15,14 @@ export interface PaneActions {
     requestId: string,
     decision: PermissionDecision,
   ) => void;
+  /** Save a code block from the transcript. */
+  saveBlock: (sessionId: string, contents: string, suggestedName: string) => void;
+  /** Open a file the transcript referred to. */
+  openInEditor: (sessionId: string, path: string) => void;
+  /** Bytes dropped or pasted onto this pane. */
+  attachBytes: (sessionId: string, name: string, dataBase64: string, mediaType: string) => void;
+  /** Something the user tried to attach that Kora will not take. */
+  rejectDrop: (sessionId: string, message: string) => void;
 }
 
 interface Props {
@@ -22,6 +30,8 @@ interface Props {
   focused: boolean;
   glow: boolean;
   query?: string;
+  /** React key of the line holding the match the user is parked on. */
+  activeMatchKey?: string;
   actions: PaneActions;
   onFocus: () => void;
   /** Input wiring — only rendered for the focused pane. */
@@ -38,14 +48,23 @@ interface Props {
     onHistoryPrev: () => boolean;
     onHistoryNext: () => boolean;
     onPickCmd: (cmd: string) => void;
-    onAttach: () => void;
-    onPasteImage: () => void;
+    vision: boolean;
     onRemoveAttachment: (id: string) => void;
   };
 }
 
-export function Pane({ session, focused, glow, query, actions, onFocus, input }: Props) {
+export function Pane({
+  session,
+  focused,
+  glow,
+  query,
+  activeMatchKey,
+  actions,
+  onFocus,
+  input,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [dropping, setDropping] = useState(false);
   const agent = agentOf(session);
 
   // Keyed on the last line's key, not on the line count: a response both removes
@@ -63,14 +82,66 @@ export function Pane({ session, focused, glow, query, actions, onFocus, input }:
       fillInput: actions.fillInput,
       answerPermission: (requestId, decision) =>
         actions.answerPermission(session.id, requestId, decision),
+      code: {
+        save: (contents: string, suggestedName: string) =>
+          actions.saveBlock(session.id, contents, suggestedName),
+        openInEditor: (path: string) => actions.openInEditor(session.id, path),
+      },
     }),
     [actions, session.id],
   );
 
+  /**
+   * Files dropped anywhere on the pane, not just on a drop target.
+   *
+   * A folder has no bytes to read here, so it is refused with a line the user
+   * can act on rather than silently ingesting whatever files it happens to
+   * contain (phase-5 scope: single files for v1).
+   */
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDropping(false);
+    const items = Array.from(e.dataTransfer?.items ?? []);
+    const folder = items.some(
+      (i) => i.kind === 'file' && i.webkitGetAsEntry?.()?.isDirectory,
+    );
+    if (folder) {
+      actions.rejectDrop(
+        session.id,
+        'Dropping a folder is not supported — drop a single file, or ask the agent to read the directory itself.',
+      );
+      return;
+    }
+    for (const file of Array.from(e.dataTransfer?.files ?? [])) {
+      // A folder arrives as a zero-byte, type-less entry; the backend would
+      // refuse it, but there is nothing to send it in the first place.
+      if (!file.type && file.size === 0) continue;
+      void readAsBase64(file).then((data) =>
+        actions.attachBytes(
+          session.id,
+          file.name,
+          data,
+          file.type || 'application/octet-stream',
+        ),
+      );
+    }
+  }
+
   return (
     <div
-      className={'k-pane' + (focused ? ' is-focused' : '')}
+      className={
+        'k-pane' + (focused ? ' is-focused' : '') + (dropping ? ' is-dropping' : '')
+      }
       onClick={focused ? undefined : onFocus}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDropping(true);
+      }}
+      onDragLeave={(e) => {
+        // Only when the pointer really left the pane, not on every child.
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false);
+      }}
+      onDrop={onDrop}
       // Each pane wears its own agent's accent, so a split Claude+Codex view
       // shows orange and green side by side.
       style={
@@ -85,7 +156,13 @@ export function Pane({ session, focused, glow, query, actions, onFocus, input }:
     >
       <div className="k-pane-rule" />
       <div ref={scrollRef} className="k-pane-scroll kscroll">
-        <Transcript session={session} agent={agent} query={query} actions={paneActions} />
+        <Transcript
+          session={session}
+          agent={agent}
+          query={query}
+          activeMatchKey={activeMatchKey}
+          actions={paneActions}
+        />
       </div>
 
       {focused ? (
@@ -101,8 +178,10 @@ export function Pane({ session, focused, glow, query, actions, onFocus, input }:
           onHistoryPrev={input.onHistoryPrev}
           onHistoryNext={input.onHistoryNext}
           onPickCmd={input.onPickCmd}
-          onAttach={input.onAttach}
-          onPasteImage={input.onPasteImage}
+          vision={input.vision}
+          onAttachBytes={(name, data, mediaType) =>
+            actions.attachBytes(session.id, name, data, mediaType)
+          }
           onRemoveAttachment={input.onRemoveAttachment}
         />
       ) : (

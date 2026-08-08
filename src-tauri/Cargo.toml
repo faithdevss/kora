@@ -21,6 +21,8 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "macros
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Images reach the agent as base64 in its own protocol's image blocks.
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

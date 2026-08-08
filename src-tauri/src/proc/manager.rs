@@ -32,7 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::adapters::{adapter_for, AgentEvent, PermissionDecision, SpawnMode};
+use crate::adapters::{adapter_for, AgentEvent, Attachment, PermissionDecision, SpawnMode};
 
 /// Tauri event name carrying every [`AgentEvent`] to the frontend.
 pub const EVENT_NAME: &str = "agent://event";
@@ -408,9 +408,19 @@ impl SessionManager {
 
     /// Sends a user turn.
     pub async fn send_prompt(&self, session_id: &str, prompt: &str) -> Result<(), String> {
+        self.send_prompt_with(session_id, prompt, &[]).await
+    }
+
+    /// Starts a turn with `prompt` and whatever the user attached to it.
+    pub async fn send_prompt_with(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        attachments: &[Attachment],
+    ) -> Result<(), String> {
         let agent_id = self.agent_id_of(session_id).await?;
         let adapter = adapter_for(&agent_id).ok_or("unknown agent")?;
-        self.write_line(session_id, &adapter.encode_prompt(prompt))
+        self.write_line(session_id, &adapter.encode_prompt_with(prompt, attachments))
             .await
     }
 

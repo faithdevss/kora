@@ -26,7 +26,7 @@ export type AgentEvent =
     }
   | { kind: 'delta'; text: string }
   | { kind: 'message_done' }
-  | { kind: 'tool'; name: string; detail: string }
+  | { kind: 'tool'; name: string; detail: string; path: string | null }
   | {
       kind: 'permission';
       request_id: string;
@@ -76,6 +76,47 @@ export interface SpawnResult {
   account: Account | null;
 }
 
+/** Mirrors `Capability` in `src-tauri/src/adapters/mod.rs`. */
+export type Capability =
+  | 'streaming'
+  | 'usage'
+  | 'cost'
+  | 'permission_prompts'
+  | 'interrupt'
+  | 'resume'
+  | 'vision';
+
+/** Mirrors `IngestedFile` in `src-tauri/src/files/ingest.rs`. */
+export interface IngestedFile {
+  path: string;
+  name: string;
+  kind: 'text' | 'image' | 'binary';
+  size: number;
+  media_type: string;
+  text: string | null;
+  data: string | null;
+  truncated: boolean;
+  note: string | null;
+}
+
+/**
+ * An attachment in the shape `agent_write` expects — the serde tagging of
+ * `Attachment` in `src-tauri/src/adapters/mod.rs`.
+ */
+export type WireAttachment =
+  | { kind: 'text'; name: string; path: string; text: string; truncated: boolean }
+  | { kind: 'image'; name: string; media_type: string; data: string };
+
+/** Mirrors `SearchHit` in `src-tauri/src/store/sessions.rs`. */
+export interface SearchHit {
+  session_id: string;
+  session_name: string;
+  agent_id: string;
+  seq: number;
+  snippet: string;
+  updated_at: number;
+}
+
 /** Mirrors `SessionMeta` in `src-tauri/src/store/sessions.rs`. */
 export interface SessionMeta {
   id: string;
@@ -106,7 +147,7 @@ export interface AgentBridge {
     model?: string;
     resumeUuid?: string;
   }): Promise<SpawnResult>;
-  write(sessionId: string, prompt: string): Promise<void>;
+  write(sessionId: string, prompt: string, attachments?: WireAttachment[]): Promise<void>;
   answerPermission(
     sessionId: string,
     tool: string,
@@ -152,6 +193,18 @@ export interface AgentBridge {
 
   /* ---- usage (Phase 3) ---- */
 
+  /* ---- files, search, capabilities (Phase 5) ---- */
+
+  /** Read a file from disk under the backend's size/binary policy. */
+  fileIngest(path: string): Promise<IngestedFile>;
+  /** Same policy, for bytes that never had a path (paste, file picker). */
+  fileIngestBytes(name: string, dataBase64: string, mediaType?: string): Promise<IngestedFile>;
+  fileSave(path: string, contents: string): Promise<string>;
+  fileOpenInEditor(path: string): Promise<string>;
+  agentCapabilities(agentId: string): Promise<Capability[]>;
+  /** Search every saved transcript. In-session search never leaves the UI. */
+  sessionsSearch(query: string, limit?: number): Promise<SearchHit[]>;
+
   usageWeek(accountId: string | null): Promise<UsageTotals>;
   usageRecord(input: {
     agentId: string;
@@ -193,9 +246,9 @@ export const tauriBridge: AgentBridge = {
     });
   },
 
-  async write(sessionId, prompt) {
+  async write(sessionId, prompt, attachments) {
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('agent_write', { sessionId, prompt });
+    await invoke('agent_write', { sessionId, prompt, attachments: attachments ?? null });
   },
 
   async answerPermission(sessionId, tool, requestId, decision) {
@@ -298,6 +351,29 @@ export const tauriBridge: AgentBridge = {
 
   /* ---- usage ---- */
 
+  async fileIngest(path) {
+    return call<IngestedFile>('file_ingest', { path });
+  },
+  async fileIngestBytes(name, dataBase64, mediaType) {
+    return call<IngestedFile>('file_ingest_bytes', {
+      name,
+      data: dataBase64,
+      mediaType: mediaType ?? null,
+    });
+  },
+  async fileSave(path, contents) {
+    return call<string>('file_save', { path, contents });
+  },
+  async fileOpenInEditor(path) {
+    return call<string>('file_open_in_editor', { path });
+  },
+  async agentCapabilities(agentId) {
+    return call<Capability[]>('agent_capabilities', { agentId });
+  },
+  async sessionsSearch(query, limit) {
+    return call<SearchHit[]>('sessions_search', { query, limit: limit ?? null });
+  },
+
   async usageWeek(accountId) {
     return call<UsageTotals>('usage_week', { accountId });
   },
@@ -368,6 +444,23 @@ export const offlineBridge: AgentBridge = {
   sessionsImportFile: async () => {
     throw new Error(DESKTOP_ONLY);
   },
+
+  // Reading files and opening editors is the desktop app's job; a browser
+  // preview has no filesystem to reach.
+  fileIngest: async () => {
+    throw new Error(DESKTOP_ONLY);
+  },
+  fileIngestBytes: async () => {
+    throw new Error(DESKTOP_ONLY);
+  },
+  fileSave: async () => {
+    throw new Error(DESKTOP_ONLY);
+  },
+  fileOpenInEditor: async () => {
+    throw new Error(DESKTOP_ONLY);
+  },
+  agentCapabilities: async () => [],
+  sessionsSearch: async () => [],
 
   usageWeek: async () => ({
     input_tokens: 0,

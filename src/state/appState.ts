@@ -15,6 +15,8 @@ import type {
   UsageTotals,
 } from '../types/agent';
 import { AGENTS, COMMON } from './mockFixtures';
+import type { SearchHit } from './agentBridge';
+import type { SearchMode } from './search';
 
 export interface AppState {
   sessions: Session[];
@@ -24,6 +26,14 @@ export interface AppState {
   attachments: Attachment[];
   searchOpen: boolean;
   searchQuery: string;
+  /** How `searchQuery` is interpreted. */
+  searchMode: SearchMode;
+  /** Which match the viewport is parked on, for next/prev. */
+  searchIndex: number;
+  /** Hits from other saved sessions, when the search was widened to all. */
+  searchAll: SearchHit[];
+  /** True while a cross-session search is in flight. */
+  searchingAll: boolean;
   /** Position in the focused session's history while arrowing through it. */
   histIdx: number | null;
   /** Bumped whenever focus should return to the command input (search closed). */
@@ -212,6 +222,10 @@ export function initialState(): AppState {
     attachments: [],
     searchOpen: false,
     searchQuery: '',
+    searchMode: 'plain',
+    searchIndex: 0,
+    searchAll: [],
+    searchingAll: false,
     histIdx: null,
     focusNonce: 0,
     density: 'comfortable',

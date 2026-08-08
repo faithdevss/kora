@@ -173,7 +173,7 @@ describe('a real turn', () => {
   it('lists tool calls under the response', async () => {
     await send('fix it');
     await emit(sid(), { kind: 'delta', text: 'On it.' });
-    await emit(sid(), { kind: 'tool', name: 'Edit', detail: 'Edit · src/a.ts' });
+    await emit(sid(), { kind: 'tool', name: 'Edit', detail: 'Edit · src/a.ts', path: 'src/a.ts' });
     expect(screen.getByText('Edit · src/a.ts')).toBeTruthy();
   });
 
@@ -409,15 +409,55 @@ describe('palette, history and search', () => {
     await emit(sid(), { kind: 'delta', text: 'tokens are counted per turn' });
 
     await send('/search');
-    const box = screen.getByPlaceholderText('Search scrollback…');
-    fireEvent.change(box, { target: { value: 'tokens' } });
+    const box = screen.getByPlaceholderText('Search this session…');
+    await act(async () => {
+      fireEvent.change(box, { target: { value: 'tokens' } });
+    });
 
-    expect(screen.getByText('2 matches')).toBeTruthy();
+    // Two occurrences, and the counter says which one is current.
+    expect(screen.getByText('1/2')).toBeTruthy();
     expect(document.querySelectorAll('mark').length).toBe(2);
 
     fireEvent.keyDown(box, { key: 'Escape' });
-    expect(screen.queryByPlaceholderText('Search scrollback…')).toBeNull();
+    expect(screen.queryByPlaceholderText('Search this session…')).toBeNull();
     expect(document.querySelectorAll('mark')).toHaveLength(0);
+  });
+
+  it('steps through matches, wrapping at the end', async () => {
+    await send('tokens, tokens, tokens');
+    await send('/search');
+    const box = screen.getByPlaceholderText('Search this session…');
+    await act(async () => {
+      fireEvent.change(box, { target: { value: 'tokens' } });
+    });
+    expect(screen.getByText('1/3')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('Next match (⏎)'));
+    });
+    expect(screen.getByText('2/3')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(box, { key: 'Enter' });
+      fireEvent.keyDown(box, { key: 'Enter' });
+    });
+    expect(screen.getByText('1/3')).toBeTruthy();
+  });
+
+  it('regex mode searches by pattern, and a broken pattern just finds nothing', async () => {
+    await send('error 404 and error 500');
+    await send('/search');
+    const box = screen.getByPlaceholderText('Search this session…');
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('Regular expression'));
+      fireEvent.change(box, { target: { value: 'error \\d+' } });
+    });
+    expect(screen.getByText('1/2')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.change(box, { target: { value: 'error (' } });
+    });
+    expect(screen.getByText('no matches')).toBeTruthy();
   });
 
   it('an unknown command errors with a clickable suggestion', async () => {
@@ -436,24 +476,41 @@ describe('palette, history and search', () => {
 describe('attachments', () => {
   beforeEach(boot);
 
-  it('stages a chip, sends it with the prompt, then clears it', async () => {
+  it('stages a real file, sends it with the prompt, then clears it', async () => {
+    const file = bridge.seedFile({ name: 'auth.ts' });
     await act(async () => {
-      fireEvent.click(screen.getByTitle('Attach image (or paste)'));
+      await store.attachPath(file.path);
     });
-    expect(screen.getByText('screenshot-1.png')).toBeTruthy();
+    expect(screen.getByText('auth.ts')).toBeTruthy();
 
     await send('what is in this?');
     expect(screen.getByText('📎 1 image')).toBeTruthy();
-    expect(screen.queryByText('screenshot-1.png')).toBeNull();
+    expect(screen.queryByText('auth.ts')).toBeNull();
+    expect(bridge.sent[0][0]).toMatchObject({ kind: 'text', name: 'auth.ts' });
   });
 
   it('removes a staged chip', async () => {
+    const file = bridge.seedFile({ name: 'notes.md' });
     await act(async () => {
-      fireEvent.click(screen.getByTitle('Attach image (or paste)'));
+      await store.attachPath(file.path);
     });
     await act(async () => {
       fireEvent.click(screen.getByTitle('Remove attachment'));
     });
-    expect(screen.queryByText('screenshot-1.png')).toBeNull();
+    expect(screen.queryByText('notes.md')).toBeNull();
+  });
+
+  it('a truncated file says so on the chip before it is sent', async () => {
+    const file = bridge.seedFile({
+      name: 'huge.log',
+      truncated: true,
+      size: 900000,
+      note: 'huge.log is 879 KB — only the first 64 KB is attached.',
+    });
+    await act(async () => {
+      await store.attachPath(file.path);
+    });
+    expect(screen.getByText('truncated')).toBeTruthy();
+    expect(screen.getByText(/only the first 64 KB/)).toBeTruthy();
   });
 });

@@ -220,6 +220,118 @@ pub async fn import(db: &Db, mut export: SessionExport) -> Result<SessionMeta, S
     Ok(export.meta)
 }
 
+/// One hit from a search across saved sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub session_id: String,
+    pub session_name: String,
+    pub agent_id: String,
+    /// Position of the line within its transcript, so opening can scroll to it.
+    pub seq: i64,
+    /// The matching line's text, trimmed to something readable.
+    pub snippet: String,
+    pub updated_at: i64,
+}
+
+/// How much of a matching line to keep around the match.
+const SNIPPET_CHARS: usize = 240;
+
+/// Searches every saved transcript for `query`, newest sessions first.
+///
+/// Matching is a case-insensitive substring over the stored line payloads —
+/// which is what the in-session search does too, so the two agree. `%` and `_`
+/// are escaped, so a query containing them finds those characters rather than
+/// acting as wildcards.
+pub async fn search(db: &Db, query: &str, limit: u32) -> Result<Vec<SearchHit>, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern = format!(
+        "%{}%",
+        query
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    let needle = query.to_lowercase();
+    let limit = limit.clamp(1, 500) as i64;
+
+    db.with(move |c| {
+        let mut stmt = c.prepare(
+            "SELECT s.id, s.name, s.agent_id, l.seq, l.payload, s.updated_at
+             FROM lines l JOIN sessions s ON s.id = l.session_id
+             WHERE lower(l.payload) LIKE ?1 ESCAPE '\\'
+             ORDER BY s.updated_at DESC, l.seq ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![pattern, limit], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, agent, seq, payload, updated)| SearchHit {
+                session_id: id,
+                session_name: name,
+                agent_id: agent,
+                seq,
+                snippet: snippet_of(&payload, &needle),
+                updated_at: updated,
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Pulls the readable text out of a stored line and centres it on the match.
+///
+/// Lines are opaque JSON owned by the frontend, so this reads the `text` field
+/// when there is one and falls back to the raw payload — a hit is still worth
+/// showing even when the line shape is one this build does not know.
+fn snippet_of(payload: &str, needle: &str) -> String {
+    let text = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| {
+            v.get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| payload.to_string());
+
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= SNIPPET_CHARS {
+        return text.trim().to_string();
+    }
+    // Centre the window on the match when the match is in the text at all.
+    let at = text
+        .to_lowercase()
+        .find(needle)
+        .map(|byte_idx| text[..byte_idx].chars().count())
+        .unwrap_or(0);
+    let start = at.saturating_sub(SNIPPET_CHARS / 3);
+    let end = (start + SNIPPET_CHARS).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +482,122 @@ mod tests {
     async fn exporting_an_unknown_session_is_an_error() {
         let db = Db::in_memory().unwrap();
         assert!(export(&db, "nope").await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn meta(id: &str, name: &str) -> SessionMeta {
+        SessionMeta {
+            id: id.into(),
+            name: name.into(),
+            agent_id: "claude".into(),
+            account_id: None,
+            model_id: None,
+            cwd: None,
+            agent_uuid: None,
+            pinned: false,
+            archived: false,
+            created_at: now(),
+            updated_at: now(),
+        }
+    }
+
+    async fn seeded() -> Db {
+        let db = Db::in_memory().unwrap();
+        upsert(&db, meta("s1", "auth work")).await.unwrap();
+        save_lines(
+            &db,
+            "s1",
+            &[
+                json!({"key":"l1","t":"cmd","text":"why does the session cookie expire early?"}),
+                json!({"key":"l2","t":"resp","text":"Because the TTL is set in seconds, not ms."}),
+            ],
+        )
+        .await
+        .unwrap();
+
+        upsert(&db, meta("s2", "deploy notes")).await.unwrap();
+        save_lines(
+            &db,
+            "s2",
+            &[json!({"key":"l1","t":"cmd","text":"roll back the 40% canary"})],
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn a_search_finds_lines_in_every_saved_session() {
+        let db = seeded().await;
+        let hits = search(&db, "TTL", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "s1");
+        assert_eq!(hits[0].session_name, "auth work");
+        assert_eq!(hits[0].seq, 1, "the line's position comes back for scrolling");
+        assert!(hits[0].snippet.contains("TTL"));
+    }
+
+    #[tokio::test]
+    async fn matching_ignores_case() {
+        let db = seeded().await;
+        assert_eq!(search(&db, "COOKIE", 50).await.unwrap().len(), 1);
+        assert_eq!(search(&db, "cookie", 50).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sql_wildcards_in_a_query_are_searched_for_not_obeyed() {
+        let db = seeded().await;
+        // Were `%` a wildcard, this would match every line in the database.
+        let hits = search(&db, "40%", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("40%"));
+
+        // A bare `%` finds the one line with a literal percent sign in it —
+        // not every line, which is what an unescaped wildcard would return.
+        let percent = search(&db, "%", 50).await.unwrap();
+        assert_eq!(percent.len(), 1);
+        assert!(percent[0].snippet.contains("40%"));
+
+        // Nothing in the corpus has an underscore, so the single-character
+        // wildcard finds nothing rather than matching anything.
+        assert!(search(&db, "_", 50).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_query_returns_nothing_rather_than_everything() {
+        let db = seeded().await;
+        assert!(search(&db, "   ", 50).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_honoured_and_bounded() {
+        let db = seeded().await;
+        assert_eq!(search(&db, "the", 1).await.unwrap().len(), 1);
+        // A zero or absurd limit must not mean "no rows" or "all of them".
+        assert!(!search(&db, "the", 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_long_line_comes_back_as_a_snippet_around_the_match() {
+        let db = Db::in_memory().unwrap();
+        upsert(&db, meta("s1", "long")).await.unwrap();
+        let padding = "x".repeat(2000);
+        save_lines(
+            &db,
+            "s1",
+            &[json!({"key":"l1","t":"resp","text":format!("{padding} NEEDLE {padding}")})],
+        )
+        .await
+        .unwrap();
+
+        let hits = search(&db, "needle", 10).await.unwrap();
+        assert!(hits[0].snippet.contains("NEEDLE"));
+        assert!(hits[0].snippet.chars().count() < 300, "trimmed to a snippet");
+        assert!(hits[0].snippet.starts_with('…'), "and marked as trimmed");
     }
 }

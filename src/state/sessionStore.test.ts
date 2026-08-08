@@ -198,8 +198,8 @@ describe('a real turn', () => {
     await Promise.resolve();
 
     bridge.emit(id, { kind: 'delta', text: 'Editing.' });
-    bridge.emit(id, { kind: 'tool', name: 'Edit', detail: 'Edit · src/a.ts' });
-    bridge.emit(id, { kind: 'tool', name: 'Bash', detail: 'Bash · npm test' });
+    bridge.emit(id, { kind: 'tool', name: 'Edit', detail: 'Edit · src/a.ts', path: 'src/a.ts' });
+    bridge.emit(id, { kind: 'tool', name: 'Bash', detail: 'Bash · npm test', path: null });
 
     expect(last()).toMatchObject({ t: 'resp', tools: ['Edit · src/a.ts', 'Bash · npm test'] });
   });
@@ -210,7 +210,7 @@ describe('a real turn', () => {
     store.submit();
     await Promise.resolve();
 
-    bridge.emit(id, { kind: 'tool', name: 'Read', detail: 'Read · src/a.ts' });
+    bridge.emit(id, { kind: 'tool', name: 'Read', detail: 'Read · src/a.ts', path: 'src/a.ts' });
     expect(last()).toMatchObject({ t: 'dim', text: 'Read · src/a.ts' });
     expect(lines().some((l) => l.t === 'think')).toBe(false);
   });
@@ -591,14 +591,27 @@ describe('input handling', () => {
   });
 
   it('sends staged attachments with the prompt and clears them', async () => {
-    store.addPlaceholderAttachment('screenshot');
-    store.addPlaceholderAttachment('pasted');
+    const file = bridge.seedFile();
+    await store.attachPath(file.path);
+    await store.attachBytes('shot.png', 'AAAB', 'image/png');
     store.setInput('what is this?');
     store.submit();
     await Promise.resolve();
 
     expect(store.getState().attachments).toHaveLength(0);
     expect(lines().find((l) => l.t === 'cmd')).toMatchObject({ atts: 2 });
+    // The bytes really travelled, in the shape the backend expects.
+    expect(bridge.sent).toHaveLength(1);
+    expect(bridge.sent[0]).toEqual([
+      {
+        kind: 'text',
+        name: file.name,
+        path: file.path,
+        text: file.text,
+        truncated: false,
+      },
+      { kind: 'image', name: 'shot.png', media_type: 'image/png', data: 'AAAB' },
+    ]);
   });
 
   it('notifies listeners and stops after unsubscribe', () => {
@@ -972,5 +985,97 @@ describe('context tracking', () => {
     store.runQuick('/compact');
     await Promise.resolve();
     expect(bridge.writes).toContainEqual([id, '/compact']);
+  });
+});
+
+describe('rich content', () => {
+  it('refuses an image for an agent that reports no vision capability', async () => {
+    bridge.capabilities.set('claude', ['streaming', 'usage']);
+    await boot();
+
+    await store.attachBytes('shot.png', 'AAAB', 'image/png');
+    expect(store.getState().attachments).toHaveLength(0);
+    expect((last() as { text: string }).text).toContain('does not accept images');
+  });
+
+  it('attaches an image when the agent can see', async () => {
+    await boot();
+    await store.attachBytes('shot.png', 'AAAB', 'image/png');
+
+    const [att] = store.getState().attachments;
+    expect(att).toMatchObject({ kind: 'image', name: 'shot.png', data: 'AAAB' });
+  });
+
+  it('reports a refusal from the backend rather than attaching nothing quietly', async () => {
+    await boot();
+    await store.attachPath('/nope/missing.ts');
+
+    expect(store.getState().attachments).toHaveLength(0);
+    expect((last() as { text: string }).text).toContain('no such file');
+  });
+
+  it('states a truncation before the turn goes out', async () => {
+    await boot();
+    const file = bridge.seedFile({ truncated: true, note: 'only the first 64 KB is attached.' });
+    await store.attachPath(file.path);
+
+    expect((last() as { text: string }).text).toContain('only the first 64 KB');
+    expect(store.getState().attachments[0].truncated).toBe(true);
+  });
+
+  it('sends a binary by reference, never as mangled text', async () => {
+    await boot();
+    const file = bridge.seedFile({ name: 'x.bin', kind: 'binary', text: null, size: 4096 });
+    await store.attachPath(file.path);
+    store.setInput('what is this?');
+    store.submit();
+    await settle();
+
+    const sent = bridge.sent[0][0];
+    expect(sent.kind).toBe('text');
+    if (sent.kind !== 'text') throw new Error('expected a text block');
+    expect(sent.text).toContain('binary file');
+    expect(sent.path).toBe(file.path);
+  });
+
+  it('saves a code block through the backend and says where it went', async () => {
+    await boot();
+    await store.saveBlock('export const x = 1;\n', './out/snippet.ts');
+
+    expect(bridge.saves).toEqual([['./out/snippet.ts', 'export const x = 1;\n']]);
+    expect((last() as { text: string }).text).toContain('./out/snippet.ts');
+  });
+
+  it('opens a file in the editor and reports the command that ran', async () => {
+    await boot();
+    await store.openInEditor('/work/auth.ts');
+
+    expect(bridge.opened).toEqual(['/work/auth.ts']);
+    expect((last() as { text: string }).text).toContain('/work/auth.ts');
+  });
+});
+
+describe('cross-session search', () => {
+  it('finds matches in sessions that are not open', async () => {
+    store.saveDelay = 0;
+    await boot();
+    store.setInput('the cookie expires early');
+    store.submit();
+    await settle();
+
+    store.setSearchQuery('cookie');
+    await store.searchAllSessions();
+
+    const hits = store.getState().searchAll;
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits[0].snippet).toContain('cookie');
+  });
+
+  it('clears stale results when the query changes', async () => {
+    await boot();
+    store.setSearchQuery('x');
+    await store.searchAllSessions();
+    store.setSearchQuery('y');
+    expect(store.getState().searchAll).toEqual([]);
   });
 });

@@ -71,6 +71,37 @@ pub enum Capability {
     Interrupt,
     /// Can restore a prior conversation by id.
     Resume,
+    /// Accepts images in a prompt.
+    Vision,
+}
+
+/// Something sent alongside a prompt.
+///
+/// Text files travel as text — the agent sees the content, truncated by the
+/// ingest layer if it was large — while images travel as base64 in whatever
+/// block shape the agent's own protocol wants. Kora never guesses at binary
+/// content it cannot read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum Attachment {
+    /// A text file, already size-guarded and possibly truncated.
+    Text {
+        /// Display name, and what the agent is told the content came from.
+        name: String,
+        /// Absolute path, so the agent can read the rest with its own tools.
+        path: String,
+        text: String,
+        /// Whether `text` is only the head of a larger file.
+        truncated: bool,
+    },
+    /// An image, base64-encoded.
+    Image {
+        name: String,
+        /// e.g. `"image/png"`.
+        media_type: String,
+        /// Base64, no data-URL prefix.
+        data: String,
+    },
 }
 
 /// One thing that happened in a session, as the frontend sees it.
@@ -100,7 +131,13 @@ pub enum AgentEvent {
     /// The assistant's message for this turn is complete.
     MessageDone,
     /// The agent used a tool. `detail` is a one-line human summary.
-    Tool { name: String, detail: String },
+    Tool {
+        name: String,
+        detail: String,
+        /// The file the call named, when it named one — so the UI can offer to
+        /// open it. `None` for tools that work on something else.
+        path: Option<String>,
+    },
     /// The agent wants permission to use a tool.
     Permission {
         request_id: String,
@@ -275,7 +312,13 @@ pub trait AgentAdapter: Send + Sync {
     ) -> SpawnSpec;
 
     /// Text to send on stdin to start a turn with `prompt`.
-    fn encode_prompt(&self, prompt: &str) -> String;
+    fn encode_prompt(&self, prompt: &str) -> String {
+        self.encode_prompt_with(prompt, &[])
+    }
+
+    /// Same, with attachments. Adapters that cannot carry them describe them in
+    /// text rather than dropping them silently.
+    fn encode_prompt_with(&self, prompt: &str, attachments: &[Attachment]) -> String;
 
     /// Text to send on stdin right after spawn, before any prompt.
     ///

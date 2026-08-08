@@ -21,8 +21,7 @@ const blankInput = {
   onHistoryPrev: () => false,
   onHistoryNext: () => false,
   onPickCmd: () => {},
-  onAttach: () => {},
-  onPasteImage: () => {},
+  vision: true,
   onRemoveAttachment: () => {},
 };
 
@@ -45,6 +44,10 @@ function noopActions(): PaneActions {
     pickItem: vi.fn(),
     fillInput: vi.fn(),
     answerPermission: vi.fn(),
+    saveBlock: vi.fn(),
+    openInEditor: vi.fn(),
+    attachBytes: vi.fn(),
+    rejectDrop: vi.fn(),
   };
 }
 

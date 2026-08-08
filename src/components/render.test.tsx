@@ -14,6 +14,7 @@ const actions = {
   pickItem: () => {},
   fillInput: () => {},
   answerPermission: () => {},
+  code: { save: () => {}, openInEditor: () => {} },
 };
 
 function withLines(lines: TranscriptLine[]): Session {

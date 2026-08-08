@@ -7,6 +7,7 @@
 pub mod accounts;
 pub mod adapters;
 pub mod commands;
+pub mod files;
 pub mod proc;
 pub mod store;
 
@@ -72,6 +73,12 @@ pub fn run() {
             commands::sessions_import_file,
             commands::usage_week,
             commands::usage_record,
+            commands::sessions_search,
+            commands::file_ingest,
+            commands::file_ingest_bytes,
+            commands::file_open_in_editor,
+            commands::file_save,
+            commands::agent_capabilities,
         ])
         .build(tauri::generate_context!())
         .expect("error while building kora")

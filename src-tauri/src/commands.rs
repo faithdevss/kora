@@ -13,7 +13,8 @@ use tauri::State;
 
 use crate::accounts::store::AccountStore;
 use crate::accounts::Account;
-use crate::adapters::{adapter_for, AccountIdentity, PermissionDecision};
+use crate::adapters::{adapter_for, AccountIdentity, Attachment, Capability, PermissionDecision};
+use crate::files::{ingest, open};
 use crate::proc::manager::SessionManager;
 use crate::store::{sessions, usage, Db};
 
@@ -21,6 +22,11 @@ use crate::store::{sessions, usage, Db};
 const MAX_SESSION_ID: usize = 64;
 /// Longest single prompt, as a crude guard against a runaway webview.
 const MAX_PROMPT_BYTES: usize = 1_000_000;
+/// Most attachments one message may carry.
+const MAX_ATTACHMENTS: usize = 12;
+/// Ceiling on a base64 payload arriving from the webview, comfortably above the
+/// image limit the ingest layer enforces on the decoded bytes.
+const MAX_INGEST_BASE64: usize = 8 * 1024 * 1024;
 
 /// Session ids are minted by the frontend (`s1`, `s2`, …). Accept only that
 /// shape so an id can never be smuggled into a path or an argv entry.
@@ -167,18 +173,25 @@ pub async fn agent_respawn(
     })
 }
 
-/// Send a user turn to a running agent.
+/// Send a user turn to a running agent, with whatever was attached to it.
 #[tauri::command]
 pub async fn agent_write(
     manager: State<'_, Arc<SessionManager>>,
     session_id: String,
     prompt: String,
+    attachments: Option<Vec<Attachment>>,
 ) -> Result<(), String> {
     validate_session_id(&session_id)?;
     if prompt.len() > MAX_PROMPT_BYTES {
         return Err("prompt is too large to send".into());
     }
-    manager.send_prompt(&session_id, &prompt).await
+    let attachments = attachments.unwrap_or_default();
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(format!("at most {MAX_ATTACHMENTS} attachments per message"));
+    }
+    manager
+        .send_prompt_with(&session_id, &prompt, &attachments)
+        .await
 }
 
 /// Answer a permission request raised by the agent.
@@ -555,4 +568,86 @@ pub async fn usage_record(
     turn: crate::adapters::Usage,
 ) -> Result<bool, String> {
     usage::record(&db, &agent_id, account_id.as_deref(), model.as_deref(), &turn).await
+}
+
+/* ---------------- files (Phase 5) ---------------- */
+
+/// Read one attached or dropped file.
+///
+/// The whole size/binary/truncation policy lives in [`crate::files::ingest`],
+/// so a 2 GB log becomes a bounded preview rather than a 2 GB IPC message.
+#[tauri::command]
+pub async fn file_ingest(path: String) -> Result<ingest::IngestedFile, String> {
+    tokio::task::spawn_blocking(move || ingest::ingest(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Open a file in the user's editor. Returns the command that ran.
+#[tauri::command]
+pub async fn file_open_in_editor(path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || open::open_in_editor(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Write text to a path the user chose — the transcript's "save code block".
+#[tauri::command]
+pub async fn file_save(path: String, contents: String) -> Result<String, String> {
+    if contents.len() > MAX_PROMPT_BYTES {
+        return Err("that is too large to save from the transcript".into());
+    }
+    tokio::task::spawn_blocking(move || open::save_text(&path, &contents))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// What the agent behind a session can do, so the UI offers only what works.
+///
+/// Image attachment is gated on this: an agent with no `vision` capability is
+/// not offered an image picker rather than being sent an image it will reject.
+#[tauri::command]
+pub async fn agent_capabilities(agent_id: String) -> Result<Vec<Capability>, String> {
+    Ok(adapter_for(&agent_id)
+        .map(|a| a.capabilities().to_vec())
+        .unwrap_or_default())
+}
+
+/* ---------------- search (Phase 5) ---------------- */
+
+/// Search every saved transcript. In-session scrollback search is a frontend
+/// concern — this is the cross-session one, which needs the store.
+#[tauri::command]
+pub async fn sessions_search(
+    db: State<'_, Db>,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<sessions::SearchHit>, String> {
+    sessions::search(&db, &query, limit.unwrap_or(100)).await
+}
+
+/// Ingest bytes that never had a path — a pasted screenshot, or a file chosen
+/// through the webview's own picker.
+///
+/// The bytes arrive base64-encoded because that is how they leave the webview;
+/// the size and binary policy is the same one [`file_ingest`] applies, so how a
+/// file got here cannot change what Kora does with it.
+#[tauri::command]
+pub async fn file_ingest_bytes(
+    name: String,
+    data: String,
+    media_type: Option<String>,
+) -> Result<ingest::IngestedFile, String> {
+    use base64::Engine;
+    if data.len() > MAX_INGEST_BASE64 {
+        return Err("that is too large to attach".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| "attachment was not valid base64".to_string())?;
+        ingest::ingest_bytes(&name, &bytes, media_type.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

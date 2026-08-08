@@ -14,10 +14,18 @@ import type {
   SpawnResult,
 } from '../state/agentBridge';
 import type { Account, PermissionDecision, UsageTotals } from '../types/agent';
+import type {
+  Capability,
+  IngestedFile,
+  SearchHit,
+  WireAttachment,
+} from '../state/agentBridge';
 
 export interface FakeBridge extends AgentBridge {
   /** Every prompt sent, in order, as `[sessionId, text]`. */
   readonly writes: [string, string][];
+  /** Attachments that went with a prompt, in the wire shape. */
+  readonly sent: WireAttachment[][];
   readonly spawns: string[];
   readonly respawns: string[];
   readonly kills: string[];
@@ -48,6 +56,35 @@ export interface FakeBridge extends AgentBridge {
   readonly loginCommands: string[];
   /** Adds a signed-in account without going through the command flow. */
   seedAccount(over?: Partial<Account>): Account;
+
+  /* ---- Phase 5 ---- */
+
+  /** Files `fileIngest` will find, keyed by path. */
+  readonly files: Map<string, IngestedFile>;
+  /** What each agent reports it can do; Claude sees images by default. */
+  readonly capabilities: Map<string, Capability[]>;
+  /** Every `[path, contents]` handed to `fileSave`. */
+  readonly saves: [string, string][];
+  /** Every path handed to `fileOpenInEditor`. */
+  readonly opened: string[];
+  /** Puts a file on the fake disk. */
+  seedFile(over?: Partial<IngestedFile>): IngestedFile;
+}
+
+/** A small text file, the shape the Rust ingest layer returns. */
+function seededFile(n: number, over: Partial<IngestedFile> = {}): IngestedFile {
+  return {
+    path: `/work/file-${n}.ts`,
+    name: `file-${n}.ts`,
+    kind: 'text',
+    size: 12,
+    media_type: 'text/typescript',
+    text: 'export const x = 1;',
+    data: null,
+    truncated: false,
+    note: null,
+    ...over,
+  };
 }
 
 /** A subscription account, which is what a `claude auth login` produces. */
@@ -115,6 +152,7 @@ export function makeFakeBridge(): FakeBridge {
 
   const bridge: FakeBridge = {
     writes: [],
+    sent: [],
     spawns: [],
     respawns: [],
     kills: [],
@@ -129,6 +167,10 @@ export function makeFakeBridge(): FakeBridge {
     saved: new Map(),
     recorded: [],
     loginCommands: [],
+    files: new Map(),
+    capabilities: new Map([['claude', ['streaming', 'usage', 'vision'] as Capability[]]]),
+    saves: [],
+    opened: [],
 
     emit(sessionId, event) {
       handlers.forEach((h) => h(sessionId, event));
@@ -138,6 +180,12 @@ export function makeFakeBridge(): FakeBridge {
       const account = seededAccount(++acctCount, over);
       bridge.accounts.push(account);
       return account;
+    },
+
+    seedFile(over = {}) {
+      const file = seededFile(bridge.files.size + 1, over);
+      bridge.files.set(file.path, file);
+      return file;
     },
 
     async spawn({ sessionId, agentId }): Promise<SpawnResult> {
@@ -170,13 +218,14 @@ export function makeFakeBridge(): FakeBridge {
       };
     },
 
-    async write(sessionId, prompt) {
+    async write(sessionId, prompt, attachments) {
       if (bridge.failNextWrite) {
         const msg = bridge.failNextWrite;
         bridge.failNextWrite = null;
         throw new Error(msg);
       }
       bridge.writes.push([sessionId, prompt]);
+      if (attachments?.length) bridge.sent.push(attachments);
     },
 
     async answerPermission(sessionId, tool, requestId, decision) {
@@ -320,6 +369,65 @@ export function makeFakeBridge(): FakeBridge {
     },
 
     /* ---- usage ---- */
+
+    /* ---- files, search, capabilities ---- */
+
+    async fileIngest(path) {
+      const seeded = bridge.files.get(path);
+      if (!seeded) throw new Error(`no such file: ${path}`);
+      return seeded;
+    },
+
+    async fileIngestBytes(name, dataBase64, mediaType) {
+      const isImage = (mediaType ?? '').startsWith('image/');
+      // The real policy lives in Rust; this mirrors only its shape, which is
+      // what the store is written against.
+      return {
+        path: '',
+        name: name.trim() || 'pasted',
+        kind: isImage ? 'image' : 'text',
+        size: Math.floor((dataBase64.length * 3) / 4),
+        media_type: mediaType ?? 'text/plain',
+        text: isImage ? null : atob(dataBase64),
+        data: isImage ? dataBase64 : null,
+        truncated: false,
+        note: null,
+      };
+    },
+
+    async fileSave(path, contents) {
+      bridge.saves.push([path, contents]);
+      return path;
+    },
+
+    async fileOpenInEditor(path) {
+      bridge.opened.push(path);
+      return `vi ${path}`;
+    },
+
+    async agentCapabilities(agentId) {
+      return bridge.capabilities.get(agentId) ?? [];
+    },
+
+    async sessionsSearch(query) {
+      const needle = query.toLowerCase();
+      const hits: SearchHit[] = [];
+      for (const { meta, lines } of bridge.saved.values()) {
+        lines.forEach((line, seq) => {
+          const text = JSON.stringify(line);
+          if (!text.toLowerCase().includes(needle)) return;
+          hits.push({
+            session_id: meta.id,
+            session_name: meta.name,
+            agent_id: meta.agent_id,
+            seq,
+            snippet: text,
+            updated_at: meta.updated_at,
+          });
+        });
+      }
+      return hits;
+    },
 
     async usageWeek(accountId) {
       const totals = emptyTotals();
