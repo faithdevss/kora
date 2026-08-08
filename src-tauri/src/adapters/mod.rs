@@ -116,6 +116,8 @@ pub enum AgentEvent {
         /// Whether the agent reported this turn as an error.
         is_error: bool,
     },
+    /// The models this agent will accept, reported by the live CLI.
+    Models { models: Vec<ModelInfo> },
     /// Rolling rate-limit / quota utilization, when the agent exposes it.
     RateLimit {
         /// e.g. "seven_day".
@@ -188,6 +190,42 @@ pub enum PermissionScope {
     SessionAll,
 }
 
+/// Who an account belongs to, as the agent itself reports it.
+///
+/// Deliberately contains nothing secret: Kora never holds a credential, so this
+/// is the whole of what it knows about an account (Phase 3 spike decision).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountIdentity {
+    pub logged_in: bool,
+    /// e.g. `"claude.ai"` for a subscription login, `"apiKey"` for a key.
+    pub auth_method: String,
+    pub email: Option<String>,
+    pub org_name: Option<String>,
+    /// e.g. `"pro"`, `"max"`. Absent for API-key auth.
+    pub subscription: Option<String>,
+}
+
+impl AccountIdentity {
+    /// Whether per-token pricing would misrepresent what this account pays.
+    ///
+    /// Subscription users are billed a flat fee, so a dollar figure derived from
+    /// token counts is an API-equivalent estimate, never actual spend.
+    pub fn is_subscription(&self) -> bool {
+        self.subscription.is_some() || self.auth_method == "claude.ai"
+    }
+}
+
+/// A model the agent will actually accept, as reported by the live CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// The value to pass to `--model` / `/model`.
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    /// The concrete model an alias resolves to, when the agent says.
+    pub resolved: Option<String>,
+}
+
 /// A file whose presence in the workspace is worth telling the user about,
 /// because the wrapped CLI picks it up on its own.
 #[derive(Debug, Clone, Copy)]
@@ -253,6 +291,27 @@ pub trait AgentAdapter: Send + Sync {
 
     /// Workspace files this agent reads on its own, for the session banner.
     fn workspace_markers(&self) -> &'static [WorkspaceMarker];
+
+    /* ---- accounts ---- */
+
+    /// Environment that scopes a spawn to one account's credentials.
+    ///
+    /// Kora passes a directory it owns; the agent stores its own credential
+    /// there. Nothing secret passes through Kora, which is why this returns a
+    /// path rather than a token (master plan, Security #6).
+    fn account_env(&self, profile_dir: &str) -> Vec<(String, String)>;
+
+    /// argv that prints this agent's auth status, if it can.
+    fn auth_status_argv(&self) -> Option<Vec<String>>;
+
+    /// Interpret the output of [`Self::auth_status_argv`].
+    fn parse_auth_status(&self, stdout: &str) -> Option<AccountIdentity>;
+
+    /// argv that starts an interactive login. Kora runs it in a terminal.
+    fn login_argv(&self) -> Option<Vec<String>>;
+
+    /// A stdin line asking the agent for its model list, if it supports that.
+    fn list_models_request(&self) -> Option<String>;
 
     /// Text to send on stdin to interrupt generation, if supported.
     fn encode_interrupt(&self) -> Option<String>;

@@ -148,7 +148,9 @@ impl SessionManager {
     /// Start (or restart) the agent for `session_id`.
     ///
     /// `resume_uuid` carries the agent conversation id when recovering from a
-    /// crash; passing `None` starts a fresh conversation.
+    /// crash; passing `None` starts a fresh conversation. `profile_dir` scopes
+    /// the spawn to one account's credentials.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         &self,
         session_id: &str,
@@ -156,6 +158,8 @@ impl SessionManager {
         cwd: &str,
         model: Option<String>,
         resume_uuid: Option<String>,
+        // Profile directory scoping this spawn to one account's credentials.
+        profile_dir: Option<String>,
     ) -> Result<String, SpawnError> {
         let adapter =
             adapter_for(agent_id).ok_or_else(|| SpawnError::NotConnected(agent_id.to_string()))?;
@@ -168,7 +172,12 @@ impl SessionManager {
             None => (uuid::Uuid::new_v4().to_string(), SpawnMode::Fresh),
         };
 
-        let spec = adapter.spawn_spec(cwd, &uuid, model.as_deref(), mode);
+        let mut spec = adapter.spawn_spec(cwd, &uuid, model.as_deref(), mode);
+        // The account's credentials live in its own profile directory, which the
+        // agent owns — Kora passes a path, never a secret.
+        if let Some(dir) = &profile_dir {
+            spec.env.extend(adapter.account_env(dir));
+        }
 
         // argv array, never a shell string (master plan, Security #4).
         let mut cmd = Command::new(&spec.program);
@@ -556,7 +565,7 @@ mod tests {
         let (sink, _rx) = recorder();
         let mgr = SessionManager::new(sink);
         let err = mgr
-            .spawn("s1", "codex", "/tmp", None, None)
+            .spawn("s1", "codex", "/tmp", None, None, None)
             .await
             .unwrap_err();
         assert!(matches!(err, SpawnError::NotConnected(_)));

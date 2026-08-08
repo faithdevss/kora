@@ -611,3 +611,266 @@ describe('input handling', () => {
     expect(seen).toHaveLength(1);
   });
 });
+
+/* ---------------- Phase 3 ---------------- */
+
+/** Lets every queued promise and the (zero-delay) save timer run. */
+async function settle(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+describe('accounts', () => {
+  it('loads the backend accounts and runs the session under the active one', async () => {
+    const personal = bridge.seedAccount({ name: 'personal' });
+    bridge.seedAccount({ name: 'work' });
+    await boot();
+
+    expect(store.getState().accounts.map((a) => a.name)).toEqual(['personal', 'work']);
+    expect(session().account?.id).toBe(personal.id);
+  });
+
+  it('shows identity rather than a masked key, because Kora holds no key', async () => {
+    bridge.seedAccount({ name: 'personal' });
+    await boot();
+    store.runQuick('/accounts');
+
+    const line = last();
+    if (line.t !== 'list') throw new Error('expected list');
+    expect(line.items[0].sub).toContain('user1@example.com');
+    expect(JSON.stringify(line.items)).not.toMatch(/sk-|••••/);
+  });
+
+  it('/accounts add creates an account and points at the agent’s own login', async () => {
+    await boot();
+    store.runQuick('/accounts add personal');
+    await settle();
+
+    expect(bridge.accounts.map((a) => a.name)).toEqual(['personal']);
+    expect(bridge.accounts[0].identity).toBeNull();
+    expect(last()).toMatchObject({ t: 'ok' });
+    expect((last() as { text: string }).text).toContain('/accounts login personal');
+  });
+
+  it('/accounts login hands over the command instead of touching the credential', async () => {
+    bridge.seedAccount({ name: 'personal' });
+    await boot();
+    store.runQuick('/accounts login personal');
+    await settle();
+
+    const text = (last() as { text: string }).text;
+    expect(text).toContain('CLAUDE_CONFIG_DIR=');
+    expect(text).toContain('claude auth login');
+    expect(text).toContain('Kora never sees it');
+  });
+
+  it('switching account restarts the agent under it, without resuming', async () => {
+    bridge.seedAccount({ name: 'personal' });
+    const work = bridge.seedAccount({ name: 'work' });
+    await boot();
+    const id = store.getState().focusedId;
+
+    // A conversation the switch is about to leave behind.
+    bridge.emit(id, { kind: 'turn_end', text: '', usage: usage(), is_error: false });
+    store.runQuick('/accounts work');
+    await settle();
+
+    expect(bridge.active.get('claude')).toBe(work.id);
+    expect(session().account?.id).toBe(work.id);
+    expect(bridge.kills).toContain(id);
+    // A fresh spawn, not a respawn: the new account never saw the old id.
+    expect(bridge.spawns.filter((s) => s === id)).toHaveLength(2);
+    expect(bridge.respawns).not.toContain(id);
+    expect(lines().some((l) => l.t === 'warn' && l.text.includes('does not carry'))).toBe(true);
+  });
+
+  it('a new tab inherits the focused account', async () => {
+    bridge.seedAccount({ name: 'personal' });
+    const work = bridge.seedAccount({ name: 'work' });
+    await boot();
+
+    store.runQuick('/accounts work');
+    await settle();
+    store.newTab();
+    await settle();
+
+    expect(session().account?.id).toBe(work.id);
+  });
+
+  it('removing an account says the credentials went with it', async () => {
+    bridge.seedAccount({ name: 'personal' });
+    await boot();
+    store.runQuick('/accounts remove personal');
+    await settle();
+
+    expect(bridge.accounts).toHaveLength(0);
+    expect((last() as { text: string }).text).toContain('profile directory');
+    expect(session().account).toBeUndefined();
+  });
+});
+
+describe('models', () => {
+  it('uses the model list the CLI reports, not the static catalogue', async () => {
+    await boot();
+    bridge.emit(store.getState().focusedId, {
+      kind: 'models',
+      models: [
+        { id: 'sonnet', display_name: 'Sonnet 5', description: 'everyday', resolved: 'claude-sonnet-5' },
+        { id: 'opus', display_name: 'Opus 5', description: 'hardest work', resolved: 'claude-opus-5' },
+      ],
+    });
+    store.runQuick('/models');
+
+    const line = last();
+    if (line.t !== 'list') throw new Error('expected list');
+    expect(line.items.map((i) => i.label)).toEqual(['Sonnet 5', 'Opus 5']);
+    expect(line.items[0].sub).toBe('everyday');
+    // The stale fixture names must not appear once the CLI has spoken.
+    expect(JSON.stringify(line.items)).not.toContain('claude-opus-4.1');
+  });
+});
+
+describe('usage tracking', () => {
+  it('records the agent’s real token counts against the active account', async () => {
+    const account = bridge.seedAccount({ name: 'personal' });
+    await boot();
+    bridge.emit(store.getState().focusedId, {
+      kind: 'turn_end',
+      text: '',
+      usage: usage({ input_tokens: 120, output_tokens: 340 }),
+      is_error: false,
+    });
+    await settle();
+
+    expect(bridge.recorded).toHaveLength(1);
+    expect(bridge.recorded[0].accountId).toBe(account.id);
+    expect(bridge.recorded[0].usage.output_tokens).toBe(340);
+    expect(store.getState().week[account.id].output_tokens).toBe(340);
+  });
+
+  it('a turn the CLI answered itself is not recorded as usage', async () => {
+    bridge.seedAccount({ name: 'personal' });
+    await boot();
+    bridge.emit(store.getState().focusedId, {
+      kind: 'turn_end',
+      text: 'ok',
+      usage: usage({ input_tokens: 0, output_tokens: 0 }),
+      is_error: false,
+    });
+    await settle();
+
+    expect(bridge.recorded).toHaveLength(0);
+  });
+
+  it('the usage panel labels a subscription figure as an estimate', async () => {
+    bridge.seedAccount({ name: 'personal' });
+    await boot();
+    store.runQuick('/statistics');
+
+    const line = last();
+    if (line.t !== 'panel') throw new Error('expected panel');
+    expect(line.data.costEstimated).toBe(true);
+    expect(line.data.plan).toBe('Claude pro');
+  });
+
+  it('an API-key account is not labelled as an estimate', async () => {
+    bridge.seedAccount({
+      name: 'byo',
+      identity: {
+        logged_in: true,
+        auth_method: 'apiKey',
+        email: null,
+        org_name: 'Acme',
+        subscription: null,
+      },
+    });
+    await boot();
+    store.runQuick('/usage');
+
+    const line = last();
+    if (line.t !== 'panel') throw new Error('expected panel');
+    expect(line.data.costEstimated).toBe(false);
+  });
+});
+
+describe('session persistence', () => {
+  beforeEach(() => {
+    store.saveDelay = 0;
+  });
+
+  it('auto-saves the transcript as it grows', async () => {
+    await boot();
+    const id = store.getState().focusedId;
+    store.setInput('hello');
+    store.submit();
+    await settle();
+
+    const saved = bridge.saved.get(id);
+    expect(saved).toBeDefined();
+    expect(saved!.meta.agent_id).toBe('claude');
+    expect(JSON.stringify(saved!.lines)).toContain('hello');
+  });
+
+  it('restores saved sessions as tabs on the next start, transcripts included', async () => {
+    await boot();
+    store.setInput('remember this');
+    store.submit();
+    await settle();
+    await store.dispose();
+
+    // A fresh app run against the same backend.
+    __resetIds();
+    const next = new SessionStore(initialState(), mockDataSource, bridge);
+    await next.start();
+    await settle();
+
+    const restored = focusedSession(next.getState());
+    expect(restored.lines.some((l) => l.t === 'cmd' && l.text === 'remember this')).toBe(true);
+    // A new tab must not collide with a restored id.
+    next.newTab();
+    expect(new Set(next.getState().sessions.map((s) => s.id)).size).toBe(
+      next.getState().sessions.length,
+    );
+    await next.dispose();
+  });
+
+  it('/session rename and /session list show the saved record', async () => {
+    await boot();
+    store.runQuick('/session rename debugging-auth');
+    await settle();
+    store.runQuick('/session list');
+    await settle();
+
+    const line = last();
+    if (line.t !== 'list') throw new Error('expected list');
+    expect(line.items[0].label).toContain('debugging-auth');
+    expect(line.items[0].right).toBe('open');
+  });
+
+  it('/session export writes a file and says where', async () => {
+    await boot();
+    store.runQuick('/session export /tmp/kora-session.json');
+    await settle();
+    expect((last() as { text: string }).text).toContain('/tmp/kora-session.json');
+  });
+
+  it('/session delete forgets the saved session', async () => {
+    await boot();
+    const id = store.getState().focusedId;
+    store.setInput('x');
+    store.submit();
+    await settle();
+    expect(bridge.saved.has(id)).toBe(true);
+
+    store.runQuick('/session delete');
+    await settle();
+    expect(bridge.saved.has(id)).toBe(false);
+  });
+
+  it('/session on its own explains the verbs rather than guessing one', async () => {
+    await boot();
+    store.runQuick('/session');
+    await settle();
+    expect(last()).toMatchObject({ t: 'list' });
+  });
+});

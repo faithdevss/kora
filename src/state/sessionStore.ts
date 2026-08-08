@@ -9,20 +9,25 @@
 
 import type { AppState } from './appState';
 import {
+  accountsFor,
   agentOf,
   availCmds,
   focusedSession,
   initialState,
+  mkSession,
   modelOf,
   nextAttachmentId,
   pushLine,
+  reserveSessionIds,
   sessionById,
   updateSession,
+  withKey,
 } from './appState';
 import {
   checkContext,
   closeTab as closeTabFn,
   isLocalCommand,
+  matchAcct,
   newTab as newTabFn,
   runCommand,
   selectAccount,
@@ -30,9 +35,17 @@ import {
   selectModel,
   toggleSplit as toggleSplitFn,
 } from './commandRouter';
+import { accountSubtitle } from './accounts';
 import { mockDataSource, type DataSource } from './mockFixtures';
-import { defaultBridge, type AgentBridge, type AgentEvent } from './agentBridge';
+import {
+  defaultBridge,
+  type AgentBridge,
+  type AgentEvent,
+  type AgentUsage,
+  type SessionMeta,
+} from './agentBridge';
 import type {
+  Account,
   Density,
   ListKind,
   PermissionDecision,
@@ -41,6 +54,27 @@ import type {
 } from '../types/agent';
 
 type Listener = () => void;
+
+/**
+ * How many saved sessions come back as tabs on start.
+ *
+ * They are ordered pinned-first, most recent next, so this keeps the long tail
+ * of old conversations out of the tab bar — `/session list` reaches the rest.
+ */
+const MAX_RESTORED_TABS = 8;
+
+/** What `/session` on its own explains. */
+const SESSION_HELP = [
+  { c: '/session list', d: 'saved sessions (add "all" for archived)' },
+  { c: '/session save [name]', d: 'write this session now' },
+  { c: '/session open <name>', d: 'bring a saved session back as a tab' },
+  { c: '/session rename <name>', d: 'rename this session' },
+  { c: '/session pin | unpin', d: 'keep it at the top of the list' },
+  { c: '/session archive', d: 'hide it without deleting it' },
+  { c: '/session delete [name]', d: 'delete a saved session' },
+  { c: '/session export [path]', d: 'write a portable JSON file' },
+  { c: '/session import <path>', d: 'read one back in' },
+];
 
 export class SessionStore {
   private state: AppState;
@@ -54,6 +88,12 @@ export class SessionStore {
   /** Sessions whose resume has not yet proved itself by producing output. */
   private resumePending = new Set<string>();
   private disposed = false;
+  /** Pending transcript writes, one timer per session (auto-save is debounced). */
+  private saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** How long a session sits idle before its transcript is written. */
+  saveDelay = 400;
+  /** True while saved sessions are being read back in, which must not re-save. */
+  private restoring = false;
 
   constructor(
     initial: AppState = initialState(),
@@ -78,7 +118,16 @@ export class SessionStore {
 
   private set(next: AppState): void {
     if (next === this.state) return;
+    const before = this.state;
     this.state = next;
+    // Anything that changed a transcript is worth persisting, so a crash or a
+    // quit never loses more than the debounce window.
+    for (const s of next.sessions) {
+      const old = before.sessions.find((p) => p.id === s.id);
+      if (!old || old.lines !== s.lines || old.name !== s.name || old.account !== s.account) {
+        this.queueSave(s.id);
+      }
+    }
     this.listeners.forEach((l) => l());
   }
 
@@ -99,6 +148,8 @@ export class SessionStore {
     } catch {
       this.cwd = null;
     }
+    await this.loadAccounts();
+    await this.restoreSessions();
     await this.ensureAgent(this.state.focusedId);
   };
 
@@ -109,8 +160,173 @@ export class SessionStore {
     this.unsubscribe = null;
     const ids = this.state.sessions.map((s) => s.id);
     this.listeners.clear();
+    // Write out anything still sitting in the debounce window before going.
+    await Promise.all(ids.map((id) => this.flushSave(id)));
     await Promise.all(ids.map((id) => this.bridge.kill(id).catch(() => {})));
   };
+
+  /* ---- accounts ---- */
+
+  /** Loads every agent's accounts from the backend store. */
+  private async loadAccounts(): Promise<void> {
+    const lists = await Promise.all(
+      this.data.agents().map((a) => this.bridge.accountsList(a.id).catch(() => [] as Account[])),
+    );
+    const accounts = lists.flat();
+    this.set({ ...this.state, accounts });
+
+    // Point sessions with no account yet at their agent's active one.
+    for (const s of this.state.sessions) {
+      if (s.account) continue;
+      const active = await this.bridge.accountsActive(s.agentId).catch(() => null);
+      if (active) this.set(updateSession(this.state, s.id, (sess) => ({ ...sess, account: active })));
+    }
+    await Promise.all(accounts.map((a) => this.refreshWeek(a.id)));
+  }
+
+  /** Re-reads Kora's own rolling seven-day record for one account. */
+  private async refreshWeek(accountId: string): Promise<void> {
+    try {
+      const week = await this.bridge.usageWeek(accountId);
+      this.set({ ...this.state, week: { ...this.state.week, [accountId]: week } });
+    } catch {
+      /* usage history is a convenience; its absence is not worth a line */
+    }
+  }
+
+  /* ---- persistence ---- */
+
+  /** The row the local store keeps for a session. */
+  private metaOf(s: Session): SessionMeta {
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      id: s.id,
+      name: s.name,
+      agent_id: s.agentId,
+      account_id: s.account?.id ?? null,
+      model_id: s.modelId,
+      cwd: s.cwd ?? this.cwd,
+      agent_uuid: s.agentUuid ?? null,
+      pinned: s.pinned ?? false,
+      archived: s.archived ?? false,
+      created_at: s.createdAt ?? now,
+      updated_at: now,
+    };
+  }
+
+  /** Schedules a transcript write, coalescing bursts of streaming deltas. */
+  private queueSave(sessionId: string): void {
+    // Loading a session back is not a change to it: without this, every launch
+    // would rewrite every restored transcript and flatten the recency order.
+    if (this.disposed || this.restoring) return;
+    // A session whose record the user deleted stays on screen but stops being
+    // written, so `/session delete` does not immediately undo itself.
+    if (sessionById(this.state, sessionId)?.unsaved) return;
+    const pending = this.saveTimers.get(sessionId);
+    if (pending) clearTimeout(pending);
+    this.saveTimers.set(
+      sessionId,
+      setTimeout(() => {
+        this.saveTimers.delete(sessionId);
+        void this.saveSession(sessionId);
+      }, this.saveDelay),
+    );
+  }
+
+  /** Writes a session now, cancelling any pending debounce for it. */
+  private async flushSave(sessionId: string): Promise<void> {
+    const pending = this.saveTimers.get(sessionId);
+    if (pending) clearTimeout(pending);
+    this.saveTimers.delete(sessionId);
+    await this.saveSession(sessionId);
+  }
+
+  private async saveSession(sessionId: string): Promise<void> {
+    const s = sessionById(this.state, sessionId);
+    if (!s || s.unsaved) return;
+    try {
+      await this.bridge.sessionsSave(this.metaOf(s), s.lines);
+      if (!s.createdAt) {
+        this.set(
+          updateSession(this.state, sessionId, (sess) => ({
+            ...sess,
+            createdAt: sess.createdAt ?? Math.floor(Date.now() / 1000),
+          })),
+        );
+      }
+    } catch {
+      /* A failed write must not interrupt the conversation; the next append
+         retries, and `/session save` reports the error out loud. */
+    }
+  }
+
+  /** Rebuilds the tabs that were open when Kora last quit. */
+  private async restoreSessions(): Promise<void> {
+    let metas: SessionMeta[];
+    try {
+      metas = await this.bridge.sessionsList(false);
+    } catch {
+      return;
+    }
+    if (!metas.length) return;
+    reserveSessionIds(metas.map((m) => m.id));
+
+    this.restoring = true;
+    try {
+      const restored: Session[] = [];
+      for (const meta of metas.slice(0, MAX_RESTORED_TABS)) {
+        const session = await this.sessionFromMeta(meta);
+        if (session) restored.push(session);
+      }
+      if (!restored.length) return;
+
+      // The blank starter tab has nothing in it worth keeping once real
+      // sessions come back; a used one (the store started before this resolved)
+      // stays.
+      const starters = this.state.sessions.filter((s) => s.lines.length > 1 || s.history.length);
+      const sessions = [...restored, ...starters];
+      this.set({
+        ...this.state,
+        sessions,
+        focusedId: sessions[0].id,
+      });
+    } finally {
+      this.restoring = false;
+    }
+  }
+
+  /** Turns a persisted row plus its transcript back into a tab. */
+  private async sessionFromMeta(meta: SessionMeta): Promise<Session | null> {
+    if (!this.data.agents().some((a) => a.id === meta.agent_id)) return null;
+    const base = mkSession(meta.agent_id);
+    let lines: TranscriptLine[] = [];
+    try {
+      // Re-key: line keys are minted per run, so a restored `l4` would collide
+      // with a `l4` created later in this one.
+      lines = (await this.bridge.sessionsLines(meta.id)).map((l) =>
+        withKey(l as Parameters<typeof withKey>[0]),
+      );
+    } catch {
+      return null;
+    }
+    return {
+      ...base,
+      id: meta.id,
+      name: meta.name,
+      agentId: meta.agent_id,
+      account: this.state.accounts.find((a) => a.id === meta.account_id),
+      modelId: meta.model_id ?? base.modelId,
+      cwd: meta.cwd ?? undefined,
+      agentUuid: meta.agent_uuid ?? undefined,
+      pinned: meta.pinned,
+      archived: meta.archived,
+      createdAt: meta.created_at,
+      lines: lines.length ? lines : base.lines,
+      // No process yet. `ensureAgent` resumes the conversation when the tab is
+      // focused, so restoring many tabs does not start many CLIs.
+      status: 'offline',
+    };
+  }
 
   /**
    * Spawns the agent for a session if it is not already running.
@@ -135,7 +351,9 @@ export class SessionStore {
     }
 
     this.setStatus(sessionId, 'starting');
-    const resumeUuid = session.status === 'dead' ? session.agentUuid : undefined;
+    // Any session that already has an agent conversation id and no process is
+    // one to resume — a crash, or a tab restored from the local store.
+    const resumeUuid = session.agentUuid;
 
     try {
       const result = resumeUuid
@@ -161,6 +379,9 @@ export class SessionStore {
           status: 'idle',
           agentUuid: result.agent_uuid,
           cwd: result.cwd,
+          // The backend chose the credentials, so its answer is the truth about
+          // which account this process is actually running under.
+          account: result.account ?? s.account,
           workspace: {
             labels: result.workspace.labels,
             mcpServers: s.workspace?.mcpServers ?? 0,
@@ -258,6 +479,23 @@ export class SessionStore {
       case 'turn_end':
         this.resumePending.delete(sessionId);
         this.finishTurn(sessionId, event);
+        break;
+
+      case 'models':
+        // The live CLI's own list, which replaces the static catalogue for this
+        // session — the fixture is stale by two model generations.
+        this.set(
+          updateSession(this.state, sessionId, (s) => ({
+            ...s,
+            models: event.models.map((m) => ({
+              id: m.id,
+              name: m.display_name || m.id,
+              desc: m.description || undefined,
+              // The agent reports no window here; keep what usage told us.
+              win: s.ctxWin,
+            })),
+          })),
+        );
         break;
 
       case 'rate_limit':
@@ -405,6 +643,29 @@ export class SessionStore {
     });
 
     this.set(checkContext(next, sessionId));
+    if (usage) void this.recordUsage(sessionId, usage);
+  }
+
+  /**
+   * Files one turn's real token counts with the local store.
+   *
+   * These are the agent's own numbers, so the weekly figure survives a restart
+   * without Kora ever estimating anything.
+   */
+  private async recordUsage(sessionId: string, usage: AgentUsage): Promise<void> {
+    const s = sessionById(this.state, sessionId);
+    if (!s) return;
+    try {
+      const recorded = await this.bridge.usageRecord({
+        agentId: s.agentId,
+        accountId: s.account?.id ?? null,
+        model: modelOf(s).id,
+        usage,
+      });
+      if (recorded && s.account) await this.refreshWeek(s.account.id);
+    } catch {
+      /* the conversation matters more than the bookkeeping */
+    }
   }
 
   /** Turns an unexpected process exit into a respawn offer. */
@@ -477,6 +738,7 @@ export class SessionStore {
     next = { ...next, input: '', histIdx: null };
 
     if (this.handleProcessCommand(next, id, text)) return;
+    if (this.handleBackendCommand(next, id, text)) return;
 
     if (text.startsWith('/') && isLocalCommand(next, id, text)) {
       this.runLocal(next, id, text);
@@ -509,9 +771,469 @@ export class SessionStore {
     return false;
   }
 
+  /**
+   * Commands that have to reach the backend before they mean anything:
+   * everything that manages accounts or saved sessions.
+   *
+   * The pure router still renders the bare `/accounts` list, because that is
+   * only a view of state already loaded. Returns whether the command was taken.
+   */
+  private handleBackendCommand(state: AppState, sessionId: string, raw: string): boolean {
+    const parts = raw.trim().split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1);
+    if (!sessionById(state, sessionId)) return false;
+
+    if ((cmd === '/accounts' || cmd === '/users') && args.length) {
+      this.set(pushLine(state, sessionId, { t: 'cmd', text: raw }));
+      void this.runAccountCommand(sessionId, args);
+      return true;
+    }
+    if (cmd === '/session' || cmd === '/sessions') {
+      this.set(pushLine(state, sessionId, { t: 'cmd', text: raw }));
+      void this.runSessionCommand(sessionId, args);
+      return true;
+    }
+    return false;
+  }
+
+  /* ---- /accounts ---- */
+
+  private async runAccountCommand(sessionId: string, args: string[]): Promise<void> {
+    const s = sessionById(this.state, sessionId);
+    if (!s) return;
+    const verb = args[0].toLowerCase();
+    const rest = args.slice(1);
+
+    try {
+      switch (verb) {
+        case 'add':
+          return await this.accountAdd(sessionId, rest.join(' '));
+        case 'login':
+          return await this.accountLogin(sessionId, rest.join(' '));
+        case 'refresh':
+          return await this.accountRefresh(sessionId, rest.join(' '));
+        case 'rename':
+          return await this.accountRename(sessionId, rest[0] ?? '', rest.slice(1).join(' '));
+        case 'remove':
+        case 'delete':
+          return await this.accountRemove(sessionId, rest.join(' '));
+        case 'switch':
+          return await this.switchAccount(sessionId, rest.join(' ').toLowerCase());
+        default:
+          // A bare name is a switch, which is what the mockup's /accounts <name>
+          // did and what most uses of this command are.
+          return await this.switchAccount(sessionId, args.join(' ').toLowerCase());
+      }
+    } catch (e) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  }
+
+  /** Reloads the account list from the backend into state. */
+  private async reloadAccounts(agentId: string): Promise<Account[]> {
+    const accounts = await this.bridge.accountsList(agentId);
+    this.set({
+      ...this.state,
+      accounts: [...this.state.accounts.filter((a) => a.agent_id !== agentId), ...accounts],
+    });
+    return accounts;
+  }
+
+  private async accountAdd(sessionId: string, name: string): Promise<void> {
+    const s = sessionById(this.state, sessionId)!;
+    if (!name.trim()) {
+      this.set(pushLine(this.state, sessionId, { t: 'err', text: 'Usage: /accounts add <name>' }));
+      return;
+    }
+    const account = await this.bridge.accountsAdd(s.agentId, name.trim());
+    await this.reloadAccounts(s.agentId);
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'ok',
+        text:
+          `Account "${account.name}" created. It has its own profile directory and is not ` +
+          `signed in yet — run \`/accounts login ${account.name}\` next.`,
+      }),
+    );
+  }
+
+  /**
+   * Signing in is the agent's own interactive flow (it opens a browser), so
+   * Kora hands over the exact command rather than driving it — which is also
+   * why no credential ever passes through Kora.
+   */
+  private async accountLogin(sessionId: string, name: string): Promise<void> {
+    const s = sessionById(this.state, sessionId)!;
+    const account = matchAcct(this.state, s, name.trim().toLowerCase());
+    if (!account) {
+      this.set(pushLine(this.state, sessionId, { t: 'err', text: 'No such account.' }));
+      return;
+    }
+    const command = await this.bridge.accountsLoginCommand(account.id);
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'out',
+        text:
+          `Run this in a terminal to sign "${account.name}" in:\n\n    ${command}\n\n` +
+          'It signs into that account\'s own profile directory — the credential stays with ' +
+          `the agent, Kora never sees it. Then run \`/accounts refresh ${account.name}\`.`,
+      }),
+    );
+  }
+
+  private async accountRefresh(sessionId: string, name: string): Promise<void> {
+    const s = sessionById(this.state, sessionId)!;
+    const accounts = name.trim()
+      ? [matchAcct(this.state, s, name.trim().toLowerCase())].filter(Boolean)
+      : accountsFor(this.state, s.agentId);
+    if (!accounts.length) {
+      this.set(pushLine(this.state, sessionId, { t: 'err', text: 'No such account.' }));
+      return;
+    }
+
+    for (const a of accounts) await this.bridge.accountsRefresh(a!.id);
+    const reloaded = await this.reloadAccounts(s.agentId);
+    // The session's copy is a snapshot; refresh it too.
+    const mine = reloaded.find((a) => a.id === s.account?.id);
+    if (mine) this.set(updateSession(this.state, sessionId, (sess) => ({ ...sess, account: mine })));
+
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'ok',
+        text: reloaded
+          .filter((a) => accounts.some((x) => x!.id === a.id))
+          .map((a) => `${a.name} — ${accountSubtitle(a)}`)
+          .join('\n'),
+      }),
+    );
+  }
+
+  private async accountRename(sessionId: string, from: string, to: string): Promise<void> {
+    const s = sessionById(this.state, sessionId)!;
+    const account = matchAcct(this.state, s, from.trim().toLowerCase());
+    if (!account || !to.trim()) {
+      this.set(
+        pushLine(this.state, sessionId, { t: 'err', text: 'Usage: /accounts rename <name> <new name>' }),
+      );
+      return;
+    }
+    await this.bridge.accountsRename(account.id, to.trim());
+    const reloaded = await this.reloadAccounts(s.agentId);
+    const renamed = reloaded.find((a) => a.id === account.id);
+    if (renamed) {
+      this.set(
+        updateSession(this.state, sessionId, (sess) =>
+          sess.account?.id === renamed.id ? { ...sess, account: renamed } : sess,
+        ),
+      );
+    }
+    this.set(
+      pushLine(this.state, sessionId, { t: 'ok', text: `Account renamed → ${to.trim()}.` }),
+    );
+  }
+
+  /**
+   * Removing an account deletes its profile directory, and with it the agent's
+   * credentials for that account — so this says so plainly.
+   */
+  private async accountRemove(sessionId: string, name: string): Promise<void> {
+    const s = sessionById(this.state, sessionId)!;
+    const account = matchAcct(this.state, s, name.trim().toLowerCase());
+    if (!account) {
+      this.set(pushLine(this.state, sessionId, { t: 'err', text: 'No such account.' }));
+      return;
+    }
+    await this.bridge.accountsRemove(account.id);
+    const reloaded = await this.reloadAccounts(s.agentId);
+    const fallback = reloaded[0];
+    this.set(
+      updateSession(this.state, sessionId, (sess) =>
+        sess.account?.id === account.id ? { ...sess, account: fallback } : sess,
+      ),
+    );
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'ok',
+        text:
+          `Account "${account.name}" removed, along with the profile directory the agent ` +
+          'kept its sign-in in. Kora held no credential of its own to delete.',
+      }),
+    );
+  }
+
+  /**
+   * Points a session at another account and restarts the agent under it.
+   *
+   * The conversation cannot come with it: history lives inside the account's own
+   * profile directory, so the agent under the new account has never seen it.
+   * Kora's transcript stays on screen, and the warning says which is which.
+   */
+  switchAccount = async (sessionId: string, name: string): Promise<void> => {
+    const s = sessionById(this.state, sessionId);
+    if (!s) return;
+    const account = matchAcct(this.state, s, name);
+    if (!account) {
+      this.set(pushLine(this.state, sessionId, { t: 'err', text: 'No such account.' }));
+      return;
+    }
+    if (account.id === s.account?.id) {
+      this.set(
+        pushLine(this.state, sessionId, { t: 'dim', text: `Already on "${account.name}".` }),
+      );
+      return;
+    }
+
+    const hadConversation = Boolean(s.agentUuid) && s.msgs > 0;
+    this.set(selectAccount(this.state, sessionId, account));
+    await this.bridge.accountsSwitch(s.agentId, account.id).catch(() => {});
+    await this.refreshWeek(account.id);
+
+    if (s.status === 'offline') return;
+    if (hadConversation) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'warn',
+          text:
+            'The agent restarts under the new account, and the conversation does not carry ' +
+            "over — it lives in the previous account's own profile. This transcript stays here.",
+          chips: [{ label: '/session save', cmd: '/session save' }],
+        }),
+      );
+    }
+
+    // A fresh process, with no resume: the new account has never seen the old
+    // conversation id.
+    await this.bridge.kill(sessionId).catch(() => {});
+    this.set(
+      updateSession(this.state, sessionId, (sess) => ({
+        ...sess,
+        status: 'offline',
+        agentUuid: undefined,
+      })),
+    );
+    await this.ensureAgent(sessionId);
+  };
+
+  /* ---- /session ---- */
+
+  private async runSessionCommand(sessionId: string, args: string[]): Promise<void> {
+    const verb = (args[0] ?? 'list').toLowerCase();
+    const rest = args.slice(1).join(' ').trim();
+
+    try {
+      switch (verb) {
+        case 'list':
+        case 'all':
+          return await this.sessionList(sessionId, verb === 'all' || rest === 'all');
+        case 'save':
+          return await this.sessionSave(sessionId, rest);
+        case 'rename':
+          return await this.sessionRename(sessionId, rest);
+        case 'delete':
+        case 'remove':
+          return await this.sessionDelete(sessionId, rest);
+        case 'pin':
+        case 'unpin':
+          return await this.sessionFlag(sessionId, { pinned: verb === 'pin' });
+        case 'archive':
+        case 'unarchive':
+          return await this.sessionFlag(sessionId, { archived: verb === 'archive' });
+        case 'export':
+          return await this.sessionExport(sessionId, rest);
+        case 'import':
+          return await this.sessionImport(sessionId, rest);
+        case 'open':
+          return await this.sessionOpen(sessionId, rest);
+        default:
+          this.set(
+            pushLine(this.state, sessionId, {
+              t: 'help',
+              agent: 'session',
+              common: SESSION_HELP,
+              extra: [],
+            }),
+          );
+      }
+    } catch (e) {
+      this.set(
+        pushLine(this.state, sessionId, {
+          t: 'err',
+          text: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    }
+  }
+
+  private async sessionList(sessionId: string, includeArchived: boolean): Promise<void> {
+    await this.flushSave(sessionId);
+    const metas = await this.bridge.sessionsList(includeArchived);
+    if (!metas.length) {
+      this.set(pushLine(this.state, sessionId, { t: 'dim', text: 'No saved sessions yet.' }));
+      return;
+    }
+    const open = new Set(this.state.sessions.map((s) => s.id));
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'list',
+        kind: 'sessions',
+        title: 'Saved sessions — /session open <name> to bring one back',
+        items: metas.map((m) => ({
+          id: m.id,
+          label: (m.pinned ? '◆ ' : '') + m.name,
+          sub: `${m.agent_id} · saved ${new Date(m.updated_at * 1000).toLocaleString()}` +
+            (m.archived ? ' · archived' : ''),
+          right: open.has(m.id) ? 'open' : '',
+          active: m.id === sessionId,
+        })),
+      }),
+    );
+  }
+
+  private async sessionSave(sessionId: string, name: string): Promise<void> {
+    this.set(
+      updateSession(this.state, sessionId, (s) => ({
+        ...s,
+        ...(name ? { name } : {}),
+        // Saving on purpose puts a deleted session back under auto-save.
+        unsaved: false,
+      })),
+    );
+    await this.flushSave(sessionId);
+    const s = sessionById(this.state, sessionId)!;
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'ok',
+        text: `Saved "${s.name}" — ${s.lines.length} lines kept locally.`,
+      }),
+    );
+  }
+
+  private async sessionRename(sessionId: string, name: string): Promise<void> {
+    if (!name) {
+      this.set(
+        pushLine(this.state, sessionId, { t: 'err', text: 'Usage: /session rename <name>' }),
+      );
+      return;
+    }
+    this.set(updateSession(this.state, sessionId, (s) => ({ ...s, name })));
+    await this.flushSave(sessionId);
+    this.set(pushLine(this.state, sessionId, { t: 'ok', text: `Session renamed → ${name}.` }));
+  }
+
+  private async sessionFlag(
+    sessionId: string,
+    flags: { pinned?: boolean; archived?: boolean },
+  ): Promise<void> {
+    this.set(updateSession(this.state, sessionId, (s) => ({ ...s, ...flags })));
+    await this.flushSave(sessionId);
+    await this.bridge.sessionsSetFlags(sessionId, flags);
+    const what = flags.pinned !== undefined ? 'pinned' : 'archived';
+    const on = flags.pinned ?? flags.archived;
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'ok',
+        text: on ? `Session ${what}.` : `Session no longer ${what}.`,
+      }),
+    );
+  }
+
+  /** Deletes a saved session. Naming the open one closes its tab too. */
+  private async sessionDelete(sessionId: string, target: string): Promise<void> {
+    const metas = await this.bridge.sessionsList(true);
+    const meta = target
+      ? metas.find((m) => m.id === target || m.name.toLowerCase() === target.toLowerCase())
+      : metas.find((m) => m.id === sessionId);
+    if (!meta) {
+      this.set(pushLine(this.state, sessionId, { t: 'err', text: 'No such saved session.' }));
+      return;
+    }
+
+    // Stop the auto-save before deleting, or the next appended line writes the
+    // record straight back.
+    this.set(
+      updateSession(this.state, meta.id, (s) => ({ ...s, unsaved: true, createdAt: undefined })),
+    );
+    await this.bridge.sessionsDelete(meta.id);
+
+    const stillOpen = this.state.sessions.some((s) => s.id === meta.id);
+    if (stillOpen && this.state.sessions.length > 1) this.closeTab(meta.id);
+
+    const still = sessionById(this.state, sessionId) ? sessionId : this.state.focusedId;
+    this.set(
+      pushLine(this.state, still, {
+        t: 'ok',
+        text:
+          `Deleted saved session "${meta.name}".` +
+          (sessionById(this.state, meta.id)
+            ? ' Its tab stays open but is no longer being saved — /session save keeps it again.'
+            : ''),
+      }),
+    );
+  }
+
+  private async sessionExport(sessionId: string, path: string): Promise<void> {
+    await this.flushSave(sessionId);
+    const file = await this.bridge.sessionsExportFile(sessionId, path || undefined);
+    this.set(pushLine(this.state, sessionId, { t: 'ok', text: `Exported to ${file}` }));
+  }
+
+  private async sessionImport(sessionId: string, path: string): Promise<void> {
+    if (!path) {
+      this.set(
+        pushLine(this.state, sessionId, { t: 'err', text: 'Usage: /session import <path>' }),
+      );
+      return;
+    }
+    const meta = await this.bridge.sessionsImportFile(path);
+    this.set(
+      pushLine(this.state, sessionId, {
+        t: 'ok',
+        text: `Imported "${meta.name}". Open it with \`/session open ${meta.name}\`.`,
+      }),
+    );
+  }
+
+  /** Brings a saved session back as a tab, resuming its agent if it can. */
+  private async sessionOpen(sessionId: string, target: string): Promise<void> {
+    const metas = await this.bridge.sessionsList(true);
+    const meta = metas.find(
+      (m) => m.id === target || m.name.toLowerCase() === target.toLowerCase(),
+    );
+    if (!meta) {
+      this.set(pushLine(this.state, sessionId, { t: 'err', text: 'No such saved session.' }));
+      return;
+    }
+    if (this.state.sessions.some((s) => s.id === meta.id)) {
+      this.focusPane(meta.id);
+      return;
+    }
+
+    reserveSessionIds([meta.id]);
+    const restored = await this.sessionFromMeta(meta);
+    if (!restored) {
+      this.set(
+        pushLine(this.state, sessionId, { t: 'err', text: `Could not read "${meta.name}".` }),
+      );
+      return;
+    }
+    this.set({
+      ...this.state,
+      sessions: [...this.state.sessions, restored],
+      focusedId: restored.id,
+    });
+    await this.ensureAgent(restored.id);
+  }
+
   /** Runs a command without the user typing it (chips, list clicks, hints). */
   runQuick = (cmd: string, sessionId: string = this.state.focusedId): void => {
     if (this.handleProcessCommand(this.state, sessionId, cmd)) return;
+    if (this.handleBackendCommand(this.state, sessionId, cmd)) return;
     if (isLocalCommand(this.state, sessionId, cmd)) {
       this.runLocal(this.state, sessionId, cmd);
       return;
@@ -697,6 +1419,10 @@ export class SessionStore {
   focusPane = (id: string): void => {
     if (this.state.focusedId === id) return;
     this.set({ ...this.state, focusedId: id, histIdx: null });
+    // Sessions restored from the local store have no process until they are
+    // looked at, so restoring eight tabs does not start eight CLIs.
+    const session = sessionById(this.state, id);
+    if (session?.status === 'offline' && session.agentUuid) void this.ensureAgent(id);
   };
 
   /** Opens a tab and starts its agent. */
@@ -764,7 +1490,10 @@ export class SessionStore {
         void this.ensureAgent(sessionId);
       }
     } else if (kind === 'accounts') {
-      this.set(selectAccount(this.state, sessionId, itemId));
+      // Clicking an account is a switch, process restart and all.
+      void this.switchAccount(sessionId, itemId);
+    } else if (kind === 'sessions') {
+      void this.runSessionCommand(sessionId, ['open', itemId]);
     } else {
       this.set(selectModel(this.state, sessionId, itemId));
       // The CLI owns model switching, so tell it rather than restarting.

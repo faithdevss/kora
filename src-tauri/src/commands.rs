@@ -11,8 +11,11 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use crate::adapters::{adapter_for, PermissionDecision};
+use crate::accounts::store::AccountStore;
+use crate::accounts::Account;
+use crate::adapters::{adapter_for, AccountIdentity, PermissionDecision};
 use crate::proc::manager::SessionManager;
+use crate::store::{sessions, usage, Db};
 
 /// Longest session id we will accept from the frontend.
 const MAX_SESSION_ID: usize = 64;
@@ -82,12 +85,15 @@ pub struct SpawnResult {
     pub workspace: WorkspaceConfig,
     /// Resolved absolute workspace path.
     pub cwd: String,
+    /// The account this session is running under, if any is configured.
+    pub account: Option<Account>,
 }
 
 /// Start an agent for a session. Replaces any process already attached to it.
 #[tauri::command]
 pub async fn agent_spawn(
     manager: State<'_, Arc<SessionManager>>,
+    accounts: State<'_, Arc<AccountStore>>,
     session_id: String,
     agent_id: String,
     cwd: String,
@@ -96,9 +102,11 @@ pub async fn agent_spawn(
     validate_session_id(&session_id)?;
     let dir = validate_cwd(&cwd)?;
     let cwd = dir.to_string_lossy().to_string();
+    let account = accounts.active(&agent_id).await;
+    let profile_dir = account.as_ref().map(|a| a.dir.clone());
 
     let agent_uuid = manager
-        .spawn(&session_id, &agent_id, &cwd, model, None)
+        .spawn(&session_id, &agent_id, &cwd, model, None, profile_dir)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -106,6 +114,7 @@ pub async fn agent_spawn(
         agent_uuid,
         workspace: WorkspaceConfig::detect(&agent_id, &dir),
         cwd,
+        account,
     })
 }
 
@@ -114,6 +123,7 @@ pub async fn agent_spawn(
 #[tauri::command]
 pub async fn agent_respawn(
     manager: State<'_, Arc<SessionManager>>,
+    accounts: State<'_, Arc<AccountStore>>,
     session_id: String,
     agent_id: String,
     cwd: String,
@@ -123,6 +133,7 @@ pub async fn agent_respawn(
     validate_session_id(&session_id)?;
     let dir = validate_cwd(&cwd)?;
     let cwd = dir.to_string_lossy().to_string();
+    let profile_dir = accounts.active(&agent_id).await.map(|a| a.dir);
 
     let mut resumed = resume_uuid.clone();
     if let Some(u) = &resumed {
@@ -133,7 +144,7 @@ pub async fn agent_respawn(
     }
 
     let agent_uuid = match manager
-        .spawn(&session_id, &agent_id, &cwd, model.clone(), resumed.clone())
+        .spawn(&session_id, &agent_id, &cwd, model.clone(), resumed.clone(), profile_dir.clone())
         .await
     {
         Ok(uuid) => uuid,
@@ -141,7 +152,7 @@ pub async fn agent_respawn(
         // session is better than a dead pane, and the UI says which it got.
         Err(e) if resumed.is_some() => {
             manager
-                .spawn(&session_id, &agent_id, &cwd, model, None)
+                .spawn(&session_id, &agent_id, &cwd, model, None, profile_dir)
                 .await
                 .map_err(|_| e.to_string())?
         }
@@ -152,6 +163,7 @@ pub async fn agent_respawn(
         agent_uuid,
         workspace: WorkspaceConfig::detect(&agent_id, &dir),
         cwd,
+        account: accounts.active(&agent_id).await,
     })
 }
 
@@ -294,4 +306,253 @@ mod tests {
             assert!(!agent_is_connected(stub.into()), "{stub} must not claim to be connected");
         }
     }
+}
+
+/* ---------------- accounts ---------------- */
+
+/// Accounts configured for an agent.
+#[tauri::command]
+pub async fn accounts_list(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+) -> Result<Vec<Account>, String> {
+    Ok(accounts.list(&agent_id).await)
+}
+
+/// The account new sessions for an agent will use.
+#[tauri::command]
+pub async fn accounts_active(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+) -> Result<Option<Account>, String> {
+    Ok(accounts.active(&agent_id).await)
+}
+
+/// Create an account and its (empty, unauthenticated) profile directory.
+#[tauri::command]
+pub async fn accounts_add(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+    name: String,
+) -> Result<Account, String> {
+    accounts.add(&agent_id, &name).await
+}
+
+#[tauri::command]
+pub async fn accounts_rename(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+    name: String,
+) -> Result<(), String> {
+    accounts.rename(&account_id, &name).await
+}
+
+/// Forget an account, deleting its profile directory and the agent's
+/// credentials inside it.
+#[tauri::command]
+pub async fn accounts_remove(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+) -> Result<(), String> {
+    accounts.remove(&account_id).await
+}
+
+/// Choose which account new sessions use.
+#[tauri::command]
+pub async fn accounts_switch(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+    account_id: String,
+) -> Result<(), String> {
+    accounts.set_active(&agent_id, &account_id).await
+}
+
+/// Ask the agent who is signed in to an account, and record the answer.
+#[tauri::command]
+pub async fn accounts_refresh(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+) -> Result<Option<AccountIdentity>, String> {
+    accounts.refresh_identity(&account_id).await
+}
+
+/// The command the user should run to sign this account in.
+///
+/// Login is interactive (it opens a browser), so Kora reports the command and
+/// its environment rather than trying to drive it — and the credential it
+/// produces belongs to the agent, never to Kora.
+#[tauri::command]
+pub async fn accounts_login_command(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+) -> Result<String, String> {
+    let (program, argv, env) = accounts.login_command(&account_id).await?;
+    let env = env
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v} "))
+        .collect::<String>();
+    Ok(format!("{env}{program} {}", argv.join(" ")))
+}
+
+/* ---------------- sessions ---------------- */
+
+#[tauri::command]
+pub async fn sessions_list(
+    db: State<'_, Db>,
+    include_archived: bool,
+) -> Result<Vec<sessions::SessionMeta>, String> {
+    sessions::list(&db, include_archived).await
+}
+
+#[tauri::command]
+pub async fn sessions_save(
+    db: State<'_, Db>,
+    meta: sessions::SessionMeta,
+    lines: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    validate_session_id(&meta.id)?;
+    let id = meta.id.clone();
+    sessions::upsert(&db, meta).await?;
+    sessions::save_lines(&db, &id, &lines).await
+}
+
+#[tauri::command]
+pub async fn sessions_lines(
+    db: State<'_, Db>,
+    session_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    validate_session_id(&session_id)?;
+    sessions::lines(&db, &session_id).await
+}
+
+#[tauri::command]
+pub async fn sessions_delete(db: State<'_, Db>, session_id: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    sessions::delete(&db, &session_id).await
+}
+
+#[tauri::command]
+pub async fn sessions_rename(
+    db: State<'_, Db>,
+    session_id: String,
+    name: String,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    sessions::rename(&db, &session_id, &name).await
+}
+
+#[tauri::command]
+pub async fn sessions_set_flags(
+    db: State<'_, Db>,
+    session_id: String,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    sessions::set_flags(&db, &session_id, pinned, archived).await
+}
+
+/// Export a session as JSON text, for the caller to write wherever it likes.
+#[tauri::command]
+pub async fn sessions_export(db: State<'_, Db>, session_id: String) -> Result<String, String> {
+    validate_session_id(&session_id)?;
+    let export = sessions::export(&db, &session_id).await?;
+    serde_json::to_string_pretty(&export).map_err(|e| e.to_string())
+}
+
+/// Writes a session export to `path`, and returns where it landed.
+///
+/// The frontend has no filesystem access of its own, so the write happens here.
+/// `path` is taken literally apart from a leading `~`; an empty path means
+/// Kora's own exports directory.
+#[tauri::command]
+pub async fn sessions_export_file(
+    db: State<'_, Db>,
+    session_id: String,
+    path: Option<String>,
+) -> Result<String, String> {
+    validate_session_id(&session_id)?;
+    let export = sessions::export(&db, &session_id).await?;
+    let json = serde_json::to_string_pretty(&export).map_err(|e| e.to_string())?;
+
+    let target = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => expand_tilde(p),
+        None => crate::store::data_dir()
+            .join("exports")
+            .join(format!("{}.kora.json", safe_file_stem(&export.meta.name))),
+    };
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&target, json).map_err(|e| format!("could not write {}: {e}", target.display()))?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Imports a session from a file written by [`sessions_export_file`].
+#[tauri::command]
+pub async fn sessions_import_file(
+    db: State<'_, Db>,
+    path: String,
+) -> Result<sessions::SessionMeta, String> {
+    let target = expand_tilde(path.trim());
+    let json = std::fs::read_to_string(&target)
+        .map_err(|e| format!("could not read {}: {e}", target.display()))?;
+    let parsed: sessions::SessionExport =
+        serde_json::from_str(&json).map_err(|e| format!("not a Kora session export: {e}"))?;
+    sessions::import(&db, parsed).await
+}
+
+/// `~/x` → `$HOME/x`. Anything else is used as given.
+fn expand_tilde(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "~".into())).join(rest),
+        None => PathBuf::from(path),
+    }
+}
+
+/// A session name reduced to something safe to use as a filename.
+fn safe_file_stem(name: &str) -> String {
+    let stem: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let stem = stem.trim_matches('-').to_string();
+    if stem.is_empty() {
+        "session".into()
+    } else {
+        stem
+    }
+}
+
+#[tauri::command]
+pub async fn sessions_import(
+    db: State<'_, Db>,
+    json: String,
+) -> Result<sessions::SessionMeta, String> {
+    let parsed: sessions::SessionExport =
+        serde_json::from_str(&json).map_err(|e| format!("not a Kora session export: {e}"))?;
+    sessions::import(&db, parsed).await
+}
+
+/* ---------------- usage ---------------- */
+
+/// Rolling seven-day totals for an account, from Kora's own record.
+#[tauri::command]
+pub async fn usage_week(
+    db: State<'_, Db>,
+    account_id: Option<String>,
+) -> Result<usage::Totals, String> {
+    usage::week(&db, account_id.as_deref()).await
+}
+
+/// Record one turn's real usage.
+#[tauri::command]
+pub async fn usage_record(
+    db: State<'_, Db>,
+    agent_id: String,
+    account_id: Option<String>,
+    model: Option<String>,
+    turn: crate::adapters::Usage,
+) -> Result<bool, String> {
+    usage::record(&db, &agent_id, account_id.as_deref(), model.as_deref(), &turn).await
 }

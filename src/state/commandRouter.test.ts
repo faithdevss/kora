@@ -21,7 +21,7 @@ import {
   toggleSplit,
   usageData,
 } from './commandRouter';
-import type { TranscriptLine } from '../types/agent';
+import type { Account, TranscriptLine } from '../types/agent';
 
 let state: AppState;
 
@@ -30,10 +30,43 @@ let state: AppState;
  * act on. Phase 2 made `initialState()` a single empty session, since real
  * transcripts now come from a real agent.
  */
+/** Two Claude accounts, shaped exactly as the backend account store reports. */
+function accounts(): Account[] {
+  return [
+    {
+      id: 'c1',
+      agent_id: 'claude',
+      name: 'personal',
+      dir: '/data/accounts/c1',
+      identity: {
+        logged_in: true,
+        auth_method: 'claude.ai',
+        email: 'me@example.com',
+        org_name: null,
+        subscription: 'max',
+      },
+    },
+    {
+      id: 'c2',
+      agent_id: 'claude',
+      name: 'work',
+      dir: '/data/accounts/c2',
+      identity: {
+        logged_in: true,
+        auth_method: 'apiKey',
+        email: null,
+        org_name: 'Acme',
+        subscription: null,
+      },
+    },
+  ];
+}
+
 function seeded(): AppState {
-  const base = initialState();
+  const base = { ...initialState(), accounts: accounts() };
   const claude = {
     ...base.sessions[0],
+    account: base.accounts[0],
     ctxUsed: 152000,
     sessIn: 119000,
     sessOut: 33000,
@@ -185,7 +218,9 @@ describe('switching', () => {
     const next = run('/agents gemini');
     const sess = focusedSession(next);
     expect(sess.agentId).toBe('gemini');
-    expect(sess.accountId).toBe('g1');
+    // Gemini has no accounts configured, so the session carries none rather
+    // than keeping the Claude one it was using.
+    expect(sess.account).toBeUndefined();
     expect(modelOf(sess).name).toBe('gemini-2.5-pro');
     expect(sess.ctxWin).toBe(1000000);
     expect(sess.name).toBe('gemini');
@@ -199,8 +234,15 @@ describe('switching', () => {
 
   it('/accounts <name> switches account within the agent', () => {
     const next = run('/accounts work');
-    expect(focusedSession(next).accountId).toBe('c2');
+    expect(focusedSession(next).account?.id).toBe('c2');
     expect(lastLine(next)).toMatchObject({ t: 'ok' });
+  });
+
+  it('an account line shows identity, because there is no key to mask', () => {
+    const line = lastLine(run('/accounts work'));
+    if (line.t !== 'ok') throw new Error('expected ok');
+    expect(line.text).toContain('Acme');
+    expect(line.text).not.toMatch(/sk-|••••/);
   });
 
   it('/models <name> switches model and context window', () => {
@@ -248,12 +290,10 @@ describe('unknown commands', () => {
 
 describe('tabs and panes', () => {
   it('a new tab inherits the focused tab agent and account', () => {
-    let s = run('/agents gemini');
-    s = run('/accounts workspace', s);
-    s = newTab(s);
+    const s = newTab(run('/accounts work'));
     const fresh = focusedSession(s);
-    expect(fresh.agentId).toBe('gemini');
-    expect(fresh.accountId).toBe('g2');
+    expect(fresh.agentId).toBe('claude');
+    expect(fresh.account?.id).toBe('c2');
     expect(fresh.lines).toHaveLength(1);
     expect(fresh.lines[0]).toMatchObject({ t: 'banner' });
   });
@@ -318,7 +358,7 @@ describe('/search', () => {
 
 describe('usageData', () => {
   it('reports only figures the agent actually gave us', () => {
-    const d = usageData(focusedSession(state));
+    const d = usageData(state, focusedSession(state));
     expect(d.ctxPct).toBeCloseTo(0.76, 2);
     // Nothing was reported for these, so they are absent rather than invented.
     expect(d.cost).toBeNull();
@@ -334,7 +374,7 @@ describe('usageData', () => {
       cacheRead: 1234,
       rateLimit: { window: 'seven_day', utilization: 0.9, resetsAt: null },
     };
-    const d = usageData(s);
+    const d = usageData(state, s);
     expect(d.cost).toBe(0.42);
     expect(d.cacheRead).toBe(1234);
     expect(d.utilization).toBe(0.9);

@@ -1,4 +1,9 @@
-/** Number/token formatting — ported from the prototype's fmt/fmtWin/estTok. */
+/**
+ * Number/token formatting — ported from the prototype's fmt/fmtWin.
+ *
+ * The prototype's `estTok` character-count estimator is gone: from Phase 2 on
+ * every token figure is one the agent itself reported.
+ */
 
 /** 1400 → "1.4k", 152000 → "152k", 3_200_000 → "3.2M" */
 export function fmt(n: number): string {
@@ -11,14 +16,6 @@ export function fmt(n: number): string {
 /** Context-window size, always in whole units: 200000 → "200k", 1e6 → "1M". */
 export function fmtWin(w: number): string {
   return w >= 1e6 ? w / 1e6 + 'M' : w / 1e3 + 'k';
-}
-
-/**
- * Rough token estimate for Phase 1 only. Phase 3 replaces every call site with
- * real usage numbers reported by the agent process.
- */
-export function estTok(str: string): number {
-  return Math.max(1, Math.round(str.length / 3.6));
 }
 
 export const CTX_WARN = 0.72;

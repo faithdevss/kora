@@ -1,6 +1,7 @@
 import type { PanelData, PanelLine as PanelLineType } from '../../types/agent';
 import { Bar } from '../Bits';
 import { CTX_WARN, compactTarget, ctxTone, fmt, fmtWin } from '../../state/format';
+import { totalTokens } from '../../state/accounts';
 
 interface Props {
   line: PanelLineType;
@@ -68,6 +69,15 @@ function money(v: number | null, digits = 2): string {
   return v === null ? '—' : `$${v.toFixed(digits)}`;
 }
 
+/**
+ * The seven-day figure: what the agent reported spending, or failing that what
+ * these tokens list at. Both are only as real as the account they belong to —
+ * `costEstimated` is what decides how the card labels them.
+ */
+function weekCost(d: PanelData): number | null {
+  return d.week?.cost_usd ?? d.week?.estimated_cost_usd ?? null;
+}
+
 function UsageCards({ d, onCompact }: { d: PanelData; onCompact: () => void }) {
   const tone = ctxTone(d.ctxPct);
   return (
@@ -106,6 +116,18 @@ function UsageCards({ d, onCompact }: { d: PanelData; onCompact: () => void }) {
           />
         )}
         <Row label="plan" value={d.plan} tone="var(--dim)" />
+        {/* Kora's own record, kept separate from the agent's quota above so the
+            two are never read as one number. */}
+        <Row
+          label="tracked by Kora · 7d"
+          value={d.week ? `${fmt(totalTokens(d.week))} tok` : '—'}
+          tone="var(--dim)"
+        />
+        <Row
+          label="tracked turns · 7d"
+          value={d.week ? d.week.turns : '—'}
+          tone="var(--dim)"
+        />
       </Card>
     </>
   );
@@ -124,14 +146,22 @@ function StatsCards({ d }: { d: PanelData }) {
         <Row label="context fill" value={`${Math.round(d.ctxPct * 100)}%`} tone={ctxTone(d.ctxPct)} />
         <Row label="total tokens" value={fmt(d.sessIn + d.sessOut)} />
       </Card>
-      <Card title="COST">
+      {/* On a subscription the plan is a flat fee, so a per-token figure is an
+          API-equivalent estimate and never what the user actually pays. The
+          card title carries that, not a footnote. */}
+      <Card title={d.costEstimated ? 'COST · API-EQUIVALENT ESTIMATE' : 'COST'}>
         <Row label="this session" value={money(d.cost)} tone="var(--green)" />
         <Row
           label="per message"
           value={d.cost !== null && d.msgs ? money(d.cost / d.msgs, 3) : '—'}
           tone="var(--dim)"
         />
-        <Row label="billed to" value={d.acctName} tone="var(--dim)" />
+        <Row label="tracked · 7d" value={money(weekCost(d))} tone="var(--dim)" />
+        <Row
+          label={d.costEstimated ? 'not billed — flat plan' : 'billed to'}
+          value={d.acctName}
+          tone="var(--dim)"
+        />
       </Card>
     </>
   );

@@ -8,19 +8,22 @@
 
 import type { AppState } from './appState';
 import {
+  accountsFor,
   acctOf,
   agentById,
   agentOf,
   availCmds,
   mkSession,
   modelOf,
+  modelsOf,
   pushLine,
   sessionById,
   updateSession,
 } from './appState';
-import { CMD_DESC, COMMON, ACCOUNTS, AGENTS } from './mockFixtures';
-import { CTX_CLEAR, CTX_WARN, fmtWin } from './format';
-import type { ListKind, PanelData, Session } from '../types/agent';
+import { accountPlan, accountSubtitle, isSubscription, totalTokens } from './accounts';
+import { CMD_DESC, COMMON, AGENTS } from './mockFixtures';
+import { CTX_CLEAR, CTX_WARN, fmt, fmtWin } from './format';
+import type { Account, ListKind, PanelData, Session } from '../types/agent';
 
 /* ---------------- local vs passthrough ---------------- */
 
@@ -46,6 +49,8 @@ export const KORA_COMMANDS = [
   '/tab',
   '/respawn',
   '/stop',
+  '/session',
+  '/sessions',
 ];
 
 /**
@@ -102,12 +107,16 @@ function matchAgent(arg: string): string | undefined {
   return AGENTS.find((x) => x.id === arg || x.name.toLowerCase().includes(arg))?.id;
 }
 
-function matchAcct(s: Session, arg: string): string | undefined {
-  return (ACCOUNTS[s.agentId] ?? []).find((x) => x.id === arg || x.name.includes(arg))?.id;
+export function matchAcct(state: AppState, s: Session, arg: string): Account | undefined {
+  return accountsFor(state, s.agentId).find(
+    (x) => x.id === arg || x.name.toLowerCase().includes(arg),
+  );
 }
 
 function matchModel(s: Session, arg: string): string | undefined {
-  return agentOf(s).models.find((x) => x.id === arg || x.name.includes(arg))?.id;
+  return modelsOf(s).find(
+    (x) => x.id === arg || x.name.toLowerCase().includes(arg),
+  )?.id;
 }
 
 /* ---------------- panel data ---------------- */
@@ -120,7 +129,7 @@ function matchModel(s: Session, arg: string): string | undefined {
  * gone rather than sitting unlabelled next to real ones. What is genuinely
  * unknown is `null`, and the panel renders it as "—".
  */
-export function usageData(s: Session): PanelData {
+export function usageData(state: AppState, s: Session): PanelData {
   const a = acctOf(s);
   return {
     ctxUsed: s.ctxUsed,
@@ -132,16 +141,20 @@ export function usageData(s: Session): PanelData {
     cacheRead: s.cacheRead,
     cost: s.costUsd ?? null,
     acctName: a?.name ?? '—',
-    plan: a?.plan ?? '—',
+    plan: a ? accountPlan(a) : '—',
+    // A subscription is billed flat, so a per-token figure is an
+    // API-equivalent estimate and the panel must say so.
+    costEstimated: isSubscription(a),
     // Real utilization when the agent reports one; otherwise nothing to show.
     utilization: s.rateLimit?.utilization ?? null,
     window: s.rateLimit?.window ?? null,
+    week: (a && state.week[a.id]) ?? null,
     model: modelOf(s).name,
   };
 }
 
-export function statsData(s: Session): PanelData {
-  const d = usageData(s);
+export function statsData(state: AppState, s: Session): PanelData {
+  const d = usageData(state, s);
   d.avgIn = s.msgs ? Math.round(s.sessIn / s.msgs) : 0;
   d.avgOut = s.msgs ? Math.round(s.sessOut / s.msgs) : 0;
   return d;
@@ -155,11 +168,15 @@ export function selectAgent(state: AppState, id: string, agentId: string | undef
   if (!agentId) return pushLine(state, id, { t: 'err', text: 'No such agent.' });
 
   const ag = agentById(agentId);
-  const acct = (ACCOUNTS[agentId] ?? [])[0];
+  const acct = accountsFor(state, agentId)[0];
   const next = updateSession(state, id, (sess) => ({
     ...sess,
     agentId,
-    accountId: acct?.id ?? '',
+    account: acct,
+    // A different agent reports its own models, and has never heard of the
+    // previous one's conversation id; neither carries over.
+    models: undefined,
+    agentUuid: undefined,
     modelId: ag.models[0].id,
     ctxWin: ag.models[0].win,
     name: ag.name.split(' ')[0].toLowerCase(),
@@ -169,27 +186,32 @@ export function selectAgent(state: AppState, id: string, agentId: string | undef
     t: 'ok',
     text:
       `Active agent → ${ag.name}. ${availCmds(updated).length} commands available` +
-      ` · account ${acct?.name ?? '—'} · ${ag.models[0].name}.`,
+      ` · account ${acct?.name ?? 'none yet'} · ${ag.models[0].name}.`,
   });
 }
 
-export function selectAccount(state: AppState, id: string, accountId: string | undefined): AppState {
+/**
+ * Points a session at an account. The process still has to be restarted under
+ * it — that is the store's job, since credentials are chosen at spawn time.
+ */
+export function selectAccount(state: AppState, id: string, account: Account | undefined): AppState {
   const s = sessionById(state, id);
   if (!s) return state;
-  const a = (ACCOUNTS[s.agentId] ?? []).find((x) => x.id === accountId);
-  if (!a) return pushLine(state, id, { t: 'err', text: 'No such account.' });
+  if (!account) return pushLine(state, id, { t: 'err', text: 'No such account.' });
 
-  const next = updateSession(state, id, (sess) => ({ ...sess, accountId: a.id }));
+  const next = updateSession(state, id, (sess) => ({ ...sess, account }));
+  const week = state.week[account.id];
+  const tracked = week ? ` Kora has tracked ${fmt(totalTokens(week))} tok this week.` : '';
   return pushLine(next, id, {
     t: 'ok',
-    text: `Account → ${a.name} · ${a.plan}  (${a.key}). Weekly usage ${a.wUsed}/${a.wLim} ${a.unit}.`,
+    text: `Account → ${account.name} · ${accountSubtitle(account)}.${tracked}`,
   });
 }
 
 export function selectModel(state: AppState, id: string, modelId: string | undefined): AppState {
   const s = sessionById(state, id);
   if (!s) return state;
-  const m = agentOf(s).models.find((x) => x.id === modelId);
+  const m = modelsOf(s).find((x) => x.id === modelId);
   if (!m) return pushLine(state, id, { t: 'err', text: 'No such model.' });
 
   const next = updateSession(state, id, (sess) => ({ ...sess, modelId: m.id, ctxWin: m.win }));
@@ -222,28 +244,47 @@ export function pushList(state: AppState, id: string, kind: ListKind): AppState 
   }
 
   if (kind === 'accounts') {
+    const accounts = accountsFor(state, s.agentId);
+    if (!accounts.length) {
+      return pushLine(state, id, {
+        t: 'dim',
+        text:
+          `No ${agentOf(s).name} accounts yet. ` +
+          '`/accounts add <name>` creates one, then `/accounts login <name>` signs it in ' +
+          "with the agent's own login — Kora never sees the credential.",
+      });
+    }
     return pushLine(state, id, {
       t: 'list',
       kind,
-      title: `Accounts for ${agentOf(s).name} — each is a separate key / subscription`,
-      items: (ACCOUNTS[s.agentId] ?? []).map((a) => ({
-        id: a.id,
-        label: a.name,
-        sub: `${a.plan}  ·  ${a.key}`,
-        right: `${a.wUsed}/${a.wLim} ${a.unit}`,
-        active: a.id === s.accountId,
-      })),
+      title: `Accounts for ${agentOf(s).name} — each is a separate profile the agent signs into`,
+      items: accounts.map((a) => {
+        const week = state.week[a.id];
+        return {
+          id: a.id,
+          label: a.name,
+          sub: accountSubtitle(a),
+          // Kora's own tracked usage, not a plan quota.
+          right: week ? `${fmt(totalTokens(week))} tok this week` : '',
+          active: a.id === s.account?.id,
+        };
+      }),
     });
   }
 
+  // Models the live CLI reported, when it has; the static list is a placeholder
+  // until then.
+  const live = Boolean(s.models?.length);
   return pushLine(state, id, {
     t: 'list',
     kind,
-    title: `Models for ${agentOf(s).name}`,
-    items: agentOf(s).models.map((m) => ({
+    title: live
+      ? `Models ${agentOf(s).name} reports`
+      : `Models for ${agentOf(s).name} (no process running — this list is not from the CLI)`,
+    items: modelsOf(s).map((m) => ({
       id: m.id,
       label: m.name,
-      sub: `${fmtWin(m.win)} context window`,
+      sub: m.desc || `${fmtWin(m.win)} context window`,
       right: '',
       active: m.id === s.modelId,
     })),
@@ -304,7 +345,7 @@ export function checkContext(state: AppState, id: string): AppState {
 /** New tab inherits the focused tab's agent + account (see phase-1 scope). */
 export function newTab(state: AppState): AppState {
   const foc = sessionById(state, state.focusedId);
-  const s = mkSession(foc?.agentId ?? AGENTS[0].id, foc?.accountId);
+  const s = mkSession(foc?.agentId ?? AGENTS[0].id, foc?.account);
   return {
     ...state,
     sessions: [...state.sessions, s],
@@ -378,8 +419,10 @@ export function runCommand(state: AppState, sessionId: string, raw: string): App
 
     case '/users':
     case '/accounts':
+      // add/remove/rename/login/refresh all touch the backend, so the store
+      // intercepts them before this point; a bare name is a switch.
       return arg
-        ? selectAccount(next, sessionId, matchAcct(s, arg))
+        ? selectAccount(next, sessionId, matchAcct(next, s, arg))
         : pushList(next, sessionId, 'accounts');
 
     case '/models':
@@ -389,10 +432,19 @@ export function runCommand(state: AppState, sessionId: string, raw: string): App
         : pushList(next, sessionId, 'models');
 
     case '/usage':
-      return pushLine(next, sessionId, { t: 'panel', kind: 'usage', data: usageData(s) });
+      return pushLine(next, sessionId, { t: 'panel', kind: 'usage', data: usageData(next, s) });
 
     case '/statistics':
-      return pushLine(next, sessionId, { t: 'panel', kind: 'stats', data: statsData(s) });
+      return pushLine(next, sessionId, { t: 'panel', kind: 'stats', data: statsData(next, s) });
+
+    // Every /session verb goes through the local store, so reaching the router
+    // means the app is running without one (browser preview).
+    case '/session':
+    case '/sessions':
+      return pushLine(next, sessionId, {
+        t: 'err',
+        text: 'Session history needs the Kora desktop app — nothing is being saved here.',
+      });
 
     case '/search':
       return { ...next, searchOpen: true };

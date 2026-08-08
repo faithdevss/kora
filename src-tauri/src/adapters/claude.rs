@@ -29,9 +29,12 @@
 use serde_json::{json, Value};
 
 use super::{
-    AgentAdapter, AgentCommand, AgentEvent, Capability, PermissionDecision, PermissionScope,
-    SpawnMode, SpawnSpec, Usage, WorkspaceMarker,
+    AccountIdentity, AgentAdapter, AgentCommand, AgentEvent, Capability, ModelInfo,
+    PermissionDecision, PermissionScope, SpawnMode, SpawnSpec, Usage, WorkspaceMarker,
 };
+
+/// Control-request id for the model query, so its reply is recognisable.
+const MODELS_REQUEST_ID: &str = "kora-models";
 
 const CAPABILITIES: &[Capability] = &[
     Capability::Streaming,
@@ -288,12 +291,16 @@ impl AgentAdapter for ClaudeAdapter {
     fn handshake(&self) -> Vec<String> {
         // Returns the agent's real slash-command list and readies the control
         // channel for set_permission_mode / interrupt.
-        vec![json!({
+        let mut lines = vec![json!({
             "type": "control_request",
             "request_id": "kora-init",
             "request": { "subtype": "initialize", "hooks": {} }
         })
-        .to_string()]
+        .to_string()];
+        // Ask for the real model list up front; it costs nothing and replaces
+        // any hardcoded guess in the UI.
+        lines.extend(self.list_models_request());
+        lines
     }
 
     fn encode_permission_reply(
@@ -322,6 +329,50 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn workspace_markers(&self) -> &'static [WorkspaceMarker] {
         MARKERS
+    }
+
+    /// `CLAUDE_CONFIG_DIR` isolates auth completely: a fresh directory reports
+    /// logged-out while the default profile stays signed in. Verified in the
+    /// Phase 3 spike.
+    fn account_env(&self, profile_dir: &str) -> Vec<(String, String)> {
+        vec![("CLAUDE_CONFIG_DIR".into(), profile_dir.into())]
+    }
+
+    fn auth_status_argv(&self) -> Option<Vec<String>> {
+        Some(vec!["auth".into(), "status".into()])
+    }
+
+    fn parse_auth_status(&self, stdout: &str) -> Option<AccountIdentity> {
+        let v: Value = serde_json::from_str(stdout.trim()).ok()?;
+        Some(AccountIdentity {
+            logged_in: v.get("loggedIn").and_then(Value::as_bool).unwrap_or(false),
+            auth_method: v
+                .get("authMethod")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+            email: v.get("email").and_then(Value::as_str).map(str::to_string),
+            org_name: v.get("orgName").and_then(Value::as_str).map(str::to_string),
+            subscription: v
+                .get("subscriptionType")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    fn login_argv(&self) -> Option<Vec<String>> {
+        Some(vec!["auth".into(), "login".into()])
+    }
+
+    fn list_models_request(&self) -> Option<String> {
+        Some(
+            json!({
+                "type": "control_request",
+                "request_id": MODELS_REQUEST_ID,
+                "request": { "subtype": "list_models" }
+            })
+            .to_string(),
+        )
     }
 
     fn encode_interrupt(&self) -> Option<String> {
@@ -409,11 +460,48 @@ impl AgentAdapter for ClaudeAdapter {
             // typed something. It also carries the agent's real command list.
             "control_response" => {
                 let response = v.get("response");
-                let is_init = response
+                let request_id = response
                     .and_then(|r| r.get("request_id"))
                     .and_then(Value::as_str)
-                    == Some("kora-init");
-                if !is_init {
+                    .unwrap_or_default();
+
+                if request_id == MODELS_REQUEST_ID {
+                    let models: Vec<ModelInfo> = response
+                        .and_then(|r| r.get("response"))
+                        .and_then(|r| r.get("models"))
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|m| {
+                                    let id = m.get("value").and_then(Value::as_str)?;
+                                    Some(ModelInfo {
+                                        id: id.to_string(),
+                                        display_name: m
+                                            .get("displayName")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or(id)
+                                            .to_string(),
+                                        description: m
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        resolved: m
+                                            .get("resolvedModel")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !models.is_empty() {
+                        out.push(AgentEvent::Models { models });
+                    }
+                    return out;
+                }
+
+                if request_id != "kora-init" {
                     return out;
                 }
                 let commands = response

@@ -112,7 +112,7 @@ async fn a_full_turn_streams_through_to_events() {
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
     let uuid = mgr
-        .spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+        .spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .expect("spawn");
     assert!(uuid::Uuid::parse_str(&uuid).is_ok(), "kora mints a real uuid");
@@ -154,7 +154,7 @@ async fn one_process_serves_many_turns() {
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -201,7 +201,7 @@ done
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -230,7 +230,7 @@ async fn a_deliberate_kill_is_not_reported_as_a_crash() {
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -259,7 +259,7 @@ async fn kill_all_stops_every_session() {
     let (sink, _rx) = recorder();
     let mgr = SessionManager::new(sink);
     for id in ["s1", "s2", "s3"] {
-        mgr.spawn(id, "claude", ws.to_str().unwrap(), None, None)
+        mgr.spawn(id, "claude", ws.to_str().unwrap(), None, None, None)
             .await
             .unwrap();
     }
@@ -282,7 +282,7 @@ async fn respawning_replaces_the_previous_process_rather_than_leaking_it() {
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
     let first = mgr
-        .spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+        .spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
     let mut seen = Vec::new();
@@ -290,14 +290,14 @@ async fn respawning_replaces_the_previous_process_rather_than_leaking_it() {
 
     // Resume keeps the agent conversation id; a fresh spawn mints a new one.
     let resumed = mgr
-        .spawn("s1", "claude", ws.to_str().unwrap(), None, Some(first.clone()))
+        .spawn("s1", "claude", ws.to_str().unwrap(), None, Some(first.clone()), None)
         .await
         .unwrap();
     assert_eq!(resumed, first);
     wait_for(&mut rx, &mut seen, |e| matches!(e, AgentEvent::Ready { .. })).await;
 
     let fresh = mgr
-        .spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+        .spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
     assert_ne!(fresh, first);
@@ -327,7 +327,7 @@ done
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -368,7 +368,7 @@ async fn a_missing_binary_reports_a_clear_error_and_starts_nothing() {
     let (sink, _rx) = recorder();
     let mgr = SessionManager::new(sink);
     let err = mgr
-        .spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+        .spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap_err()
         .to_string();
@@ -398,7 +398,7 @@ async fn real_cli_accepts_our_argv() {
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
     let uuid = mgr
-        .spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+        .spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .expect("real claude should spawn");
 
@@ -449,6 +449,7 @@ async fn real_cli_completes_a_turn() {
         "claude",
         ws.to_str().unwrap(),
         Some("haiku".to_string()),
+        None,
         None,
     )
     .await
@@ -517,7 +518,7 @@ async fn an_agent_that_dies_instantly_still_reports_its_exit() {
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -552,7 +553,7 @@ async fn a_live_agent_that_closed_stdout_is_not_mistaken_for_a_dead_one() {
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -587,7 +588,7 @@ async fn a_wedged_agent_does_not_block_other_sessions() {
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -598,7 +599,7 @@ async fn a_wedged_agent_does_not_block_other_sessions() {
     let ws2 = workspace("wedged-healthy");
     let healthy = stub_agent(&ws2, ECHO_TURNS);
     std::env::set_var("KORA_CLAUDE_BIN", &healthy);
-    mgr.spawn("s2", "claude", ws2.to_str().unwrap(), None, None)
+    mgr.spawn("s2", "claude", ws2.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -641,7 +642,7 @@ sleep 60
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
 
@@ -685,7 +686,7 @@ sleep 60
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
     let mut seen = Vec::new();
@@ -705,7 +706,7 @@ sleep 60
     std::env::set_var("KORA_CLAUDE_BIN", &healthy);
 
     let started = std::time::Instant::now();
-    mgr.spawn("s2", "claude", ws2.to_str().unwrap(), None, None)
+    mgr.spawn("s2", "claude", ws2.to_str().unwrap(), None, None, None)
         .await
         .expect("a blocked write must not stall an unrelated spawn");
     mgr.send_prompt("s2", "still working?").await.unwrap();
@@ -738,7 +739,7 @@ sleep 60
 
     let (sink, mut rx) = recorder();
     let mgr = SessionManager::new(sink);
-    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None)
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
         .await
         .unwrap();
     let mut seen = Vec::new();
@@ -752,5 +753,95 @@ sleep 60
             assert_ne!(text, "STALE", "a dead spawn's output must not be emitted");
         }
     }
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// A stub that writes the config dir it was spawned with to `report`.
+///
+/// `CLAUDE_CONFIG_DIR` is the whole of Kora's account mechanism: the agent
+/// stores its own credentials in that directory, and Kora passes a path rather
+/// than ever holding a secret (Phase 3 spike). The report path is baked into
+/// the script rather than passed through the environment, which is shared by
+/// every test in this file, and it is written *before* the init line so that
+/// seeing `Ready` is proof the file is already there.
+fn report_config_dir(report: &Path) -> String {
+    format!(
+        r#"
+printf '%s' "$CLAUDE_CONFIG_DIR" > '{report}'
+echo '{{"type":"system","subtype":"init","session_id":"stub-1","model":"stub-model","mcp_servers":[],"slash_commands":[]}}'
+while IFS= read -r line; do
+  echo '{{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{{"input_tokens":1,"output_tokens":1}}}}'
+done
+"#,
+        report = report.display()
+    )
+}
+
+#[tokio::test]
+async fn a_spawn_runs_inside_the_accounts_own_profile_directory() {
+    let _guard = env_lock().lock().await;
+    let ws = workspace("account");
+    let report = ws.join("config-dir.txt");
+    let stub = stub_agent(&ws, &report_config_dir(&report));
+    std::env::set_var("KORA_CLAUDE_BIN", &stub);
+
+    let profile = ws.join("profiles").join("work");
+    std::fs::create_dir_all(&profile).unwrap();
+
+    let (sink, mut rx) = recorder();
+    let mgr = SessionManager::new(sink);
+    mgr.spawn(
+        "s1",
+        "claude",
+        ws.to_str().unwrap(),
+        None,
+        None,
+        Some(profile.to_string_lossy().to_string()),
+    )
+    .await
+    .expect("spawn");
+
+    let mut seen = Vec::new();
+    wait_for(&mut rx, &mut seen, |e| matches!(e, AgentEvent::Ready { .. })).await;
+
+    let reported = std::fs::read_to_string(&report).expect("stub reported its config dir");
+    assert_eq!(
+        reported.trim(),
+        profile.to_string_lossy(),
+        "the process must run against the account's own profile directory"
+    );
+
+    mgr.kill("s1").await;
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
+async fn a_spawn_without_an_account_sets_no_config_dir() {
+    let _guard = env_lock().lock().await;
+    let ws = workspace("no-account");
+    let report = ws.join("config-dir.txt");
+    let stub = stub_agent(&ws, &report_config_dir(&report));
+    std::env::set_var("KORA_CLAUDE_BIN", &stub);
+
+    // Whatever the developer's own shell has set must not leak into the spawn
+    // decision under test.
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+
+    let (sink, mut rx) = recorder();
+    let mgr = SessionManager::new(sink);
+    mgr.spawn("s1", "claude", ws.to_str().unwrap(), None, None, None)
+        .await
+        .expect("spawn");
+
+    let mut seen = Vec::new();
+    wait_for(&mut rx, &mut seen, |e| matches!(e, AgentEvent::Ready { .. })).await;
+
+    let reported = std::fs::read_to_string(&report).unwrap();
+    assert!(
+        reported.trim().is_empty(),
+        "with no account, the agent uses its own default profile: {reported:?}"
+    );
+
+    mgr.kill("s1").await;
     let _ = std::fs::remove_dir_all(&ws);
 }

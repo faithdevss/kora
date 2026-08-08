@@ -4,15 +4,19 @@
 //! (Phase 3), no filesystem access beyond checking that a workspace exists and
 //! whether it carries the agent's own config files.
 
+pub mod accounts;
 pub mod adapters;
 pub mod commands;
 pub mod proc;
+pub mod store;
 
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager, RunEvent};
 
+use accounts::store::AccountStore;
 use proc::manager::{SessionEvent, SessionManager, EVENT_NAME};
+use store::Db;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,6 +28,19 @@ pub fn run() {
                 let _ = handle.emit(EVENT_NAME, event);
             })));
             app.manage(manager);
+
+            // Local persistence and the account list. A failure here is not
+            // fatal: Kora still runs, it just cannot remember anything.
+            let root = store::data_dir();
+            match Db::open(&root) {
+                Ok(db) => {
+                    app.manage(db);
+                }
+                Err(e) => {
+                    eprintln!("kora: local store unavailable ({e}); history will not persist");
+                }
+            }
+            app.manage(Arc::new(AccountStore::new(&root)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -35,6 +52,26 @@ pub fn run() {
             commands::agent_kill,
             commands::agent_is_connected,
             commands::workspace_dir,
+            commands::accounts_list,
+            commands::accounts_active,
+            commands::accounts_add,
+            commands::accounts_rename,
+            commands::accounts_remove,
+            commands::accounts_switch,
+            commands::accounts_refresh,
+            commands::accounts_login_command,
+            commands::sessions_list,
+            commands::sessions_save,
+            commands::sessions_lines,
+            commands::sessions_delete,
+            commands::sessions_rename,
+            commands::sessions_set_flags,
+            commands::sessions_export,
+            commands::sessions_export_file,
+            commands::sessions_import,
+            commands::sessions_import_file,
+            commands::usage_week,
+            commands::usage_record,
         ])
         .build(tauri::generate_context!())
         .expect("error while building kora")

@@ -12,6 +12,8 @@ export interface Model {
   name: string;
   /** Context window size in tokens. */
   win: number;
+  /** The agent's own one-line description, when it reports one. */
+  desc?: string;
 }
 
 /** A coding agent CLI that Kora can wrap. */
@@ -26,17 +28,50 @@ export interface Agent {
   extra: string[];
 }
 
-/** One credential/subscription for an agent. Phase 3 backs this with the keychain. */
+/**
+ * Who is signed in to an account, as the agent itself reported it.
+ *
+ * Mirrors `AccountIdentity` in `src-tauri/src/adapters/mod.rs`. Deliberately
+ * carries nothing secret: Kora never holds a credential, so there is no key to
+ * mask here — the Phase 3 spike replaced the mockup's masked-key field with
+ * real identity.
+ */
+export interface AccountIdentity {
+  logged_in: boolean;
+  /** e.g. `"claude.ai"` for a subscription login, `"apiKey"` for a key. */
+  auth_method: string;
+  email: string | null;
+  org_name: string | null;
+  /** e.g. `"pro"`, `"max"`. Absent for API-key auth. */
+  subscription: string | null;
+}
+
+/**
+ * One account for an agent: a profile directory the agent authenticates into.
+ *
+ * Mirrors `Account` in `src-tauri/src/accounts/mod.rs`, field for field, so the
+ * Tauri payload needs no translation.
+ */
 export interface Account {
   id: string;
+  agent_id: string;
   name: string;
-  plan: string;
-  /** Masked credential reference. A raw secret must never reach this type. */
-  key: string;
-  /** Rolling usage Kora itself recorded — NOT authoritative plan quota. */
-  wUsed: number;
-  wLim: number;
-  unit: string;
+  /** Profile directory. A path, never a secret. */
+  dir: string;
+  identity: AccountIdentity | null;
+}
+
+/** Rolling usage Kora itself recorded — NOT an authoritative plan quota. */
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** What the agent said it cost, summed. `null` when it reported none. */
+  cost_usd: number | null;
+  /** List-price equivalent for these tokens; not spend on a subscription. */
+  estimated_cost_usd: number | null;
+  turns: number;
 }
 
 /* ---------------- transcript lines ---------------- */
@@ -84,7 +119,7 @@ export interface ListItem {
   dot?: string;
 }
 
-export type ListKind = 'agents' | 'accounts' | 'models';
+export type ListKind = 'agents' | 'accounts' | 'models' | 'sessions';
 
 export interface HelpEntry {
   c: string;
@@ -106,10 +141,19 @@ export interface PanelData {
   cost: number | null;
   acctName: string;
   plan: string;
+  /**
+   * Whether `cost` is an API-equivalent estimate rather than spend.
+   *
+   * True for subscription accounts, which are billed a flat fee — the panel
+   * must never present a per-token figure as what they actually pay.
+   */
+  costEstimated: boolean;
   /** Real quota utilization 0–1, or `null` when the agent exposes none. */
   utilization: number | null;
   /** Which window the utilization covers, e.g. "seven_day". */
   window: string | null;
+  /** Kora's own rolling 7-day record for this account, or `null` if untracked. */
+  week: UsageTotals | null;
   model: string;
   avgIn?: number;
   avgOut?: number;
@@ -273,7 +317,8 @@ export interface Session {
   pid: string;
   name: string;
   agentId: string;
-  accountId: string;
+  /** The account this session runs under. Absent until one is configured. */
+  account?: Account;
   modelId: string;
   ctxWin: number;
   ctxUsed: number;
@@ -304,6 +349,22 @@ export interface Session {
   rateLimit?: RateLimit;
   /** Slash commands the agent itself provides, learned at handshake. */
   agentCommands?: HelpEntry[];
+  /** Models the live CLI reported at handshake. Beats any hardcoded list. */
+  models?: Model[];
+
+  /* ---- Phase 3: the persisted record behind this tab ---- */
+
+  /** Kept out of the way of the archive sweep, and listed first. */
+  pinned?: boolean;
+  archived?: boolean;
+  /** Unix seconds; set when the session was first persisted. */
+  createdAt?: number;
+  /**
+   * Set when the user deleted this session's saved record while its tab stayed
+   * open: the transcript is still on screen, but auto-save stops until they ask
+   * for it again with `/session save`.
+   */
+  unsaved?: boolean;
 }
 
 export type Density = 'comfortable' | 'compact';
