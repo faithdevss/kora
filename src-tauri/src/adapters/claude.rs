@@ -29,9 +29,12 @@
 use serde_json::{json, Value};
 
 use super::{
-    AgentAdapter, AgentCommand, AgentEvent, Capability, PermissionDecision, PermissionScope,
-    SpawnMode, SpawnSpec, Usage, WorkspaceMarker,
+    AccountIdentity, AgentAdapter, AgentCommand, AgentEvent, Attachment, Capability, ModelInfo,
+    PermissionDecision, PermissionScope, SpawnMode, SpawnSpec, Usage, WorkspaceMarker,
 };
+
+/// Control-request id for the model query, so its reply is recognisable.
+const MODELS_REQUEST_ID: &str = "kora-models";
 
 const CAPABILITIES: &[Capability] = &[
     Capability::Streaming,
@@ -40,6 +43,9 @@ const CAPABILITIES: &[Capability] = &[
     Capability::PermissionPrompts,
     Capability::Interrupt,
     Capability::Resume,
+    // Every model the CLI currently offers accepts images; `ModelInfo.vision`
+    // narrows this per model when the CLI says otherwise.
+    Capability::Vision,
 ];
 
 /// Files `claude` reads from the workspace on its own.
@@ -175,7 +181,19 @@ impl ClaudeAdapter {
                     scope,
                 });
             }
-            "compact_boundary" => out.push(AgentEvent::Compacted),
+            // The CLI reports what the context held before it compacted, which
+            // is the only real measure of what compaction freed — the new size
+            // is not known until the next turn reports its usage.
+            "compact_boundary" => {
+                let meta = v.get("compact_metadata");
+                out.push(AgentEvent::Compacted {
+                    pre_tokens: meta.and_then(|m| m.get("pre_tokens")).and_then(Value::as_u64),
+                    trigger: meta
+                        .and_then(|m| m.get("trigger"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            }
             "api_error" => {
                 if let Some(msg) = v.get("message").and_then(Value::as_str) {
                     out.push(AgentEvent::Error {
@@ -277,10 +295,45 @@ impl AgentAdapter for ClaudeAdapter {
         }
     }
 
-    fn encode_prompt(&self, prompt: &str) -> String {
+    /// One user message, with the attachments as extra content blocks.
+    ///
+    /// Images use the API's own base64 image block. A text file is sent as its
+    /// (already size-guarded) content plus the path it came from, so the agent
+    /// can read the rest itself rather than Kora shipping a whole repository
+    /// through the prompt.
+    fn encode_prompt_with(&self, prompt: &str, attachments: &[Attachment]) -> String {
+        let mut content: Vec<Value> = Vec::with_capacity(attachments.len() + 1);
+
+        for att in attachments {
+            match att {
+                Attachment::Image {
+                    media_type, data, ..
+                } => content.push(json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                })),
+                Attachment::Text {
+                    name,
+                    path,
+                    text,
+                    truncated,
+                } => {
+                    let note = if *truncated {
+                        format!(
+                            "Attached file {name} ({path}), truncated — read the file for the rest:"
+                        )
+                    } else {
+                        format!("Attached file {name} ({path}):")
+                    };
+                    content.push(json!({ "type": "text", "text": format!("{note}\n\n{text}") }));
+                }
+            }
+        }
+        content.push(json!({ "type": "text", "text": prompt }));
+
         json!({
             "type": "user",
-            "message": { "role": "user", "content": [{ "type": "text", "text": prompt }] }
+            "message": { "role": "user", "content": content }
         })
         .to_string()
     }
@@ -288,12 +341,16 @@ impl AgentAdapter for ClaudeAdapter {
     fn handshake(&self) -> Vec<String> {
         // Returns the agent's real slash-command list and readies the control
         // channel for set_permission_mode / interrupt.
-        vec![json!({
+        let mut lines = vec![json!({
             "type": "control_request",
             "request_id": "kora-init",
             "request": { "subtype": "initialize", "hooks": {} }
         })
-        .to_string()]
+        .to_string()];
+        // Ask for the real model list up front; it costs nothing and replaces
+        // any hardcoded guess in the UI.
+        lines.extend(self.list_models_request());
+        lines
     }
 
     fn encode_permission_reply(
@@ -322,6 +379,50 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn workspace_markers(&self) -> &'static [WorkspaceMarker] {
         MARKERS
+    }
+
+    /// `CLAUDE_CONFIG_DIR` isolates auth completely: a fresh directory reports
+    /// logged-out while the default profile stays signed in. Verified in the
+    /// Phase 3 spike.
+    fn account_env(&self, profile_dir: &str) -> Vec<(String, String)> {
+        vec![("CLAUDE_CONFIG_DIR".into(), profile_dir.into())]
+    }
+
+    fn auth_status_argv(&self) -> Option<Vec<String>> {
+        Some(vec!["auth".into(), "status".into()])
+    }
+
+    fn parse_auth_status(&self, stdout: &str) -> Option<AccountIdentity> {
+        let v: Value = serde_json::from_str(stdout.trim()).ok()?;
+        Some(AccountIdentity {
+            logged_in: v.get("loggedIn").and_then(Value::as_bool).unwrap_or(false),
+            auth_method: v
+                .get("authMethod")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+            email: v.get("email").and_then(Value::as_str).map(str::to_string),
+            org_name: v.get("orgName").and_then(Value::as_str).map(str::to_string),
+            subscription: v
+                .get("subscriptionType")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    fn login_argv(&self) -> Option<Vec<String>> {
+        Some(vec!["auth".into(), "login".into()])
+    }
+
+    fn list_models_request(&self) -> Option<String> {
+        Some(
+            json!({
+                "type": "control_request",
+                "request_id": MODELS_REQUEST_ID,
+                "request": { "subtype": "list_models" }
+            })
+            .to_string(),
+        )
     }
 
     fn encode_interrupt(&self) -> Option<String> {
@@ -366,11 +467,14 @@ impl AgentAdapter for ClaudeAdapter {
                                 .and_then(Value::as_str)
                                 .unwrap_or("tool")
                                 .to_string();
-                            let detail = Self::tool_detail(
-                                &name,
-                                block.get("input").unwrap_or(&Value::Null),
-                            );
-                            out.push(AgentEvent::Tool { name, detail });
+                            let input = block.get("input").unwrap_or(&Value::Null);
+                            let detail = Self::tool_detail(&name, input);
+                            let path = input
+                                .get("file_path")
+                                .or_else(|| input.get("path"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            out.push(AgentEvent::Tool { name, detail, path });
                         }
                     }
                 }
@@ -409,11 +513,48 @@ impl AgentAdapter for ClaudeAdapter {
             // typed something. It also carries the agent's real command list.
             "control_response" => {
                 let response = v.get("response");
-                let is_init = response
+                let request_id = response
                     .and_then(|r| r.get("request_id"))
                     .and_then(Value::as_str)
-                    == Some("kora-init");
-                if !is_init {
+                    .unwrap_or_default();
+
+                if request_id == MODELS_REQUEST_ID {
+                    let models: Vec<ModelInfo> = response
+                        .and_then(|r| r.get("response"))
+                        .and_then(|r| r.get("models"))
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|m| {
+                                    let id = m.get("value").and_then(Value::as_str)?;
+                                    Some(ModelInfo {
+                                        id: id.to_string(),
+                                        display_name: m
+                                            .get("displayName")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or(id)
+                                            .to_string(),
+                                        description: m
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                        resolved: m
+                                            .get("resolvedModel")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !models.is_empty() {
+                        out.push(AgentEvent::Models { models });
+                    }
+                    return out;
+                }
+
+                if request_id != "kora-init" {
                     return out;
                 }
                 let commands = response
@@ -456,6 +597,74 @@ mod tests {
 
     fn parse(line: &str) -> Vec<AgentEvent> {
         ClaudeAdapter.parse_line(line)
+    }
+
+    #[test]
+    fn a_prompt_with_no_attachments_is_a_single_text_block() {
+        let line = ClaudeAdapter.encode_prompt("hello");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hello");
+    }
+
+    #[test]
+    fn an_image_travels_as_the_api_s_own_base64_block() {
+        let line = ClaudeAdapter.encode_prompt_with(
+            "what is this?",
+            &[Attachment::Image {
+                name: "shot.png".into(),
+                media_type: "image/png".into(),
+                data: "AAAB".into(),
+            }],
+        );
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "AAAB");
+        // The prompt itself comes last, after what it refers to.
+        assert_eq!(content[1]["text"], "what is this?");
+    }
+
+    #[test]
+    fn a_truncated_file_says_so_and_names_the_path_to_read_the_rest() {
+        let line = ClaudeAdapter.encode_prompt_with(
+            "summarize",
+            &[Attachment::Text {
+                name: "big.log".into(),
+                path: "/tmp/big.log".into(),
+                text: "line one".into(),
+                truncated: true,
+            }],
+        );
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let block = v["message"]["content"][0]["text"].as_str().unwrap();
+
+        assert!(block.contains("truncated"));
+        assert!(block.contains("/tmp/big.log"));
+        assert!(block.ends_with("line one"));
+    }
+
+    #[test]
+    fn an_untruncated_file_is_not_described_as_partial() {
+        let line = ClaudeAdapter.encode_prompt_with(
+            "review",
+            &[Attachment::Text {
+                name: "a.rs".into(),
+                path: "/tmp/a.rs".into(),
+                text: "fn main() {}".into(),
+                truncated: false,
+            }],
+        );
+        let block = serde_json::from_str::<Value>(&line).unwrap()["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!block.contains("truncated"));
     }
 
     #[test]
@@ -578,7 +787,8 @@ mod tests {
             events,
             vec![AgentEvent::Tool {
                 name: "Edit".into(),
-                detail: "Edit · src/a.ts".into()
+                detail: "Edit · src/a.ts".into(),
+                path: Some("src/a.ts".into()),
             }]
         );
     }
@@ -676,10 +886,27 @@ mod tests {
     }
 
     #[test]
-    fn compact_boundary_reports_a_compaction() {
+    fn compact_boundary_reports_a_compaction_and_what_it_freed() {
+        assert_eq!(
+            parse(
+                r#"{"type":"system","subtype":"compact_boundary",
+                    "compact_metadata":{"trigger":"manual","pre_tokens":152000}}"#
+            ),
+            vec![AgentEvent::Compacted {
+                pre_tokens: Some(152000),
+                trigger: Some("manual".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn a_compaction_without_metadata_reports_no_numbers_rather_than_zero() {
         assert_eq!(
             parse(r#"{"type":"system","subtype":"compact_boundary"}"#),
-            vec![AgentEvent::Compacted]
+            vec![AgentEvent::Compacted {
+                pre_tokens: None,
+                trigger: None
+            }]
         );
     }
 

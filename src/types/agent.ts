@@ -12,6 +12,8 @@ export interface Model {
   name: string;
   /** Context window size in tokens. */
   win: number;
+  /** The agent's own one-line description, when it reports one. */
+  desc?: string;
 }
 
 /** A coding agent CLI that Kora can wrap. */
@@ -26,17 +28,50 @@ export interface Agent {
   extra: string[];
 }
 
-/** One credential/subscription for an agent. Phase 3 backs this with the keychain. */
+/**
+ * Who is signed in to an account, as the agent itself reported it.
+ *
+ * Mirrors `AccountIdentity` in `src-tauri/src/adapters/mod.rs`. Deliberately
+ * carries nothing secret: Kora never holds a credential, so there is no key to
+ * mask here — the Phase 3 spike replaced the mockup's masked-key field with
+ * real identity.
+ */
+export interface AccountIdentity {
+  logged_in: boolean;
+  /** e.g. `"claude.ai"` for a subscription login, `"apiKey"` for a key. */
+  auth_method: string;
+  email: string | null;
+  org_name: string | null;
+  /** e.g. `"pro"`, `"max"`. Absent for API-key auth. */
+  subscription: string | null;
+}
+
+/**
+ * One account for an agent: a profile directory the agent authenticates into.
+ *
+ * Mirrors `Account` in `src-tauri/src/accounts/mod.rs`, field for field, so the
+ * Tauri payload needs no translation.
+ */
 export interface Account {
   id: string;
+  agent_id: string;
   name: string;
-  plan: string;
-  /** Masked credential reference. A raw secret must never reach this type. */
-  key: string;
-  /** Rolling usage Kora itself recorded — NOT authoritative plan quota. */
-  wUsed: number;
-  wLim: number;
-  unit: string;
+  /** Profile directory. A path, never a secret. */
+  dir: string;
+  identity: AccountIdentity | null;
+}
+
+/** Rolling usage Kora itself recorded — NOT an authoritative plan quota. */
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** What the agent said it cost, summed. `null` when it reported none. */
+  cost_usd: number | null;
+  /** List-price equivalent for these tokens; not spend on a subscription. */
+  estimated_cost_usd: number | null;
+  turns: number;
 }
 
 /* ---------------- transcript lines ---------------- */
@@ -73,6 +108,22 @@ export interface QuickChip {
   cmd: string;
 }
 
+export type SuggestionTone = 'urgent' | 'info';
+
+/**
+ * One optimization suggestion. Produced only from measured conditions, and its
+ * actions are always real commands — Kora never edits the conversation itself
+ * (see `state/suggestions.ts`).
+ */
+export interface Suggestion {
+  /** Stable per rule, so a banner can fire once per crossing. */
+  id: string;
+  tone: SuggestionTone;
+  text: string;
+  /** One-click actions. Empty when the suggestion is only an observation. */
+  chips: QuickChip[];
+}
+
 export interface ListItem {
   id: string;
   label: string;
@@ -84,7 +135,7 @@ export interface ListItem {
   dot?: string;
 }
 
-export type ListKind = 'agents' | 'accounts' | 'models';
+export type ListKind = 'agents' | 'accounts' | 'models' | 'sessions';
 
 export interface HelpEntry {
   c: string;
@@ -106,11 +157,24 @@ export interface PanelData {
   cost: number | null;
   acctName: string;
   plan: string;
+  /**
+   * Whether `cost` is an API-equivalent estimate rather than spend.
+   *
+   * True for subscription accounts, which are billed a flat fee — the panel
+   * must never present a per-token figure as what they actually pay.
+   */
+  costEstimated: boolean;
   /** Real quota utilization 0–1, or `null` when the agent exposes none. */
   utilization: number | null;
   /** Which window the utilization covers, e.g. "seven_day". */
   window: string | null;
+  /** Kora's own rolling 7-day record for this account, or `null` if untracked. */
+  week: UsageTotals | null;
   model: string;
+  /** True when the context figure predates a compaction the agent just did. */
+  ctxStale: boolean;
+  /** Optimization suggestions that currently apply. Empty when none do. */
+  tips: Suggestion[];
   avgIn?: number;
   avgOut?: number;
 }
@@ -134,6 +198,8 @@ export interface RespLine extends LineBase {
   text: string;
   block?: string;
   lang?: string;
+  /** File this block came from, when a tool call named one — enables "open". */
+  path?: string;
   tool?: string;
   /** Tool calls made while producing this response. */
   tools?: string[];
@@ -232,9 +298,31 @@ export type NewLine =
 
 /* ---------------- session ---------------- */
 
+/** What an attachment is, which decides how it travels to the agent. */
+export type AttachmentKind = 'text' | 'image' | 'binary';
+
+/**
+ * One file or image attached to the next prompt.
+ *
+ * Mirrors `IngestedFile` in `src-tauri/src/files/ingest.rs` — the size and
+ * binary policy is enforced there, so this type only carries the result.
+ */
 export interface Attachment {
   id: string;
   name: string;
+  kind: AttachmentKind;
+  /** Absolute path, or empty for something pasted that never hit disk. */
+  path: string;
+  /** Size on disk, before any truncation. */
+  size: number;
+  mediaType: string;
+  /** Text content, already truncated by the backend. */
+  text?: string;
+  /** Base64 image bytes. */
+  data?: string;
+  truncated: boolean;
+  /** Something the user should know before sending, e.g. that it was cut. */
+  note?: string;
 }
 
 /** Whether a session's agent process is up, and what it is doing. */
@@ -273,7 +361,8 @@ export interface Session {
   pid: string;
   name: string;
   agentId: string;
-  accountId: string;
+  /** The account this session runs under. Absent until one is configured. */
+  account?: Account;
   modelId: string;
   ctxWin: number;
   ctxUsed: number;
@@ -283,8 +372,18 @@ export interface Session {
   cacheRead: number;
   msgs: number;
   history: string[];
-  /** True once the context warning has fired, so it fires only once per climb. */
-  suggested: boolean;
+  /**
+   * Id of the context banner last raised, so each threshold fires once per
+   * climb rather than on every turn above it. Cleared when context drops back
+   * under `CTX_CLEAR`.
+   */
+  warned?: string;
+  /**
+   * True between a compaction and the next turn that reports usage: the agent
+   * has thrown context away, so the last measurement is known to be too high
+   * and the UI marks it approximate rather than quietly showing a stale number.
+   */
+  ctxStale?: boolean;
   lines: TranscriptLine[];
 
   /* ---- Phase 2: the live process behind this tab ---- */
@@ -304,6 +403,72 @@ export interface Session {
   rateLimit?: RateLimit;
   /** Slash commands the agent itself provides, learned at handshake. */
   agentCommands?: HelpEntry[];
+  /** Models the live CLI reported at handshake. Beats any hardcoded list. */
+  models?: Model[];
+
+  /* ---- Phase 3: the persisted record behind this tab ---- */
+
+  /** Kept out of the way of the archive sweep, and listed first. */
+  pinned?: boolean;
+  archived?: boolean;
+  /** Unix seconds; set when the session was first persisted. */
+  createdAt?: number;
+  /**
+   * Set when the user deleted this session's saved record while its tab stayed
+   * open: the transcript is still on screen, but auto-save stops until they ask
+   * for it again with `/session save`.
+   */
+  unsaved?: boolean;
 }
 
 export type Density = 'comfortable' | 'compact';
+
+/* ---------------- settings & notifications (Phase 6) ---------------- */
+
+/** Mirrors `NotificationSettings` in `src-tauri/src/settings/config.rs`. */
+export interface NotificationSettings {
+  context: boolean;
+  usage: boolean;
+  auth: boolean;
+  errors: boolean;
+  updates: boolean;
+}
+
+/**
+ * Mirrors `Settings` in `src-tauri/src/settings/config.rs`.
+ *
+ * The backend clamps anything unreasonable and returns what it stored, so the
+ * UI renders the saved value rather than the requested one.
+ */
+export interface Settings {
+  theme: string;
+  fontSize: number;
+  fontFamily: string;
+  density: Density;
+  glow: boolean;
+  statusBar: boolean;
+  defaultAgent: string;
+  defaultModel: string | null;
+  /** Ask the agent to compact itself at the urgent threshold (Phase 4). */
+  autoCompact: boolean;
+  notifications: NotificationSettings;
+}
+
+export type ToastKind = 'context' | 'usage' | 'auth' | 'errors' | 'updates';
+
+/**
+ * A notification.
+ *
+ * Deliberately carries no conversation content: these can surface while the
+ * screen is locked, so they name the session and the condition, never a quote
+ * from the transcript (phase-6 Security).
+ */
+export interface Toast {
+  id: string;
+  kind: ToastKind;
+  text: string;
+  /** Session it concerns, for the "go there" action. */
+  sessionId?: string;
+  /** A one-click response, e.g. `/compact`. */
+  action?: QuickChip;
+}

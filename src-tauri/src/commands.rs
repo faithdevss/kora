@@ -11,13 +11,40 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use crate::adapters::{adapter_for, PermissionDecision};
+use crate::accounts::store::AccountStore;
+use crate::accounts::Account;
+use crate::adapters::{adapter_for, AccountIdentity, Attachment, Capability, PermissionDecision};
+use crate::files::{ingest, open};
 use crate::proc::manager::SessionManager;
+use crate::settings::config::{Settings, SettingsStore};
+use crate::store::{sessions, usage, Db};
 
 /// Longest session id we will accept from the frontend.
 const MAX_SESSION_ID: usize = 64;
 /// Longest single prompt, as a crude guard against a runaway webview.
 const MAX_PROMPT_BYTES: usize = 1_000_000;
+/// Most attachments one message may carry.
+const MAX_ATTACHMENTS: usize = 12;
+/// Ceiling on a base64 payload arriving from the webview, comfortably above the
+/// image limit the ingest layer enforces on the decoded bytes.
+const MAX_INGEST_BASE64: usize = 8 * 1024 * 1024;
+
+/// Longest free-text field (a name, a query, a path) the webview may send.
+///
+/// Not a security boundary on its own — everything below also validates its
+/// shape — but it stops a runaway webview from handing the backend a megabyte
+/// where a word was expected.
+const MAX_FIELD: usize = 4096;
+/// Longest session export the webview may hand back for import.
+const MAX_IMPORT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Rejects an over-long free-text field, naming what was too long.
+fn validate_len(what: &str, value: &str) -> Result<(), String> {
+    if value.len() > MAX_FIELD {
+        return Err(format!("{what} is too long"));
+    }
+    Ok(())
+}
 
 /// Session ids are minted by the frontend (`s1`, `s2`, …). Accept only that
 /// shape so an id can never be smuggled into a path or an argv entry.
@@ -82,12 +109,15 @@ pub struct SpawnResult {
     pub workspace: WorkspaceConfig,
     /// Resolved absolute workspace path.
     pub cwd: String,
+    /// The account this session is running under, if any is configured.
+    pub account: Option<Account>,
 }
 
 /// Start an agent for a session. Replaces any process already attached to it.
 #[tauri::command]
 pub async fn agent_spawn(
     manager: State<'_, Arc<SessionManager>>,
+    accounts: State<'_, Arc<AccountStore>>,
     session_id: String,
     agent_id: String,
     cwd: String,
@@ -96,9 +126,11 @@ pub async fn agent_spawn(
     validate_session_id(&session_id)?;
     let dir = validate_cwd(&cwd)?;
     let cwd = dir.to_string_lossy().to_string();
+    let account = accounts.active(&agent_id).await;
+    let profile_dir = account.as_ref().map(|a| a.dir.clone());
 
     let agent_uuid = manager
-        .spawn(&session_id, &agent_id, &cwd, model, None)
+        .spawn(&session_id, &agent_id, &cwd, model, None, profile_dir)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -106,6 +138,7 @@ pub async fn agent_spawn(
         agent_uuid,
         workspace: WorkspaceConfig::detect(&agent_id, &dir),
         cwd,
+        account,
     })
 }
 
@@ -114,6 +147,7 @@ pub async fn agent_spawn(
 #[tauri::command]
 pub async fn agent_respawn(
     manager: State<'_, Arc<SessionManager>>,
+    accounts: State<'_, Arc<AccountStore>>,
     session_id: String,
     agent_id: String,
     cwd: String,
@@ -123,6 +157,7 @@ pub async fn agent_respawn(
     validate_session_id(&session_id)?;
     let dir = validate_cwd(&cwd)?;
     let cwd = dir.to_string_lossy().to_string();
+    let profile_dir = accounts.active(&agent_id).await.map(|a| a.dir);
 
     let mut resumed = resume_uuid.clone();
     if let Some(u) = &resumed {
@@ -133,7 +168,7 @@ pub async fn agent_respawn(
     }
 
     let agent_uuid = match manager
-        .spawn(&session_id, &agent_id, &cwd, model.clone(), resumed.clone())
+        .spawn(&session_id, &agent_id, &cwd, model.clone(), resumed.clone(), profile_dir.clone())
         .await
     {
         Ok(uuid) => uuid,
@@ -141,7 +176,7 @@ pub async fn agent_respawn(
         // session is better than a dead pane, and the UI says which it got.
         Err(e) if resumed.is_some() => {
             manager
-                .spawn(&session_id, &agent_id, &cwd, model, None)
+                .spawn(&session_id, &agent_id, &cwd, model, None, profile_dir)
                 .await
                 .map_err(|_| e.to_string())?
         }
@@ -152,21 +187,29 @@ pub async fn agent_respawn(
         agent_uuid,
         workspace: WorkspaceConfig::detect(&agent_id, &dir),
         cwd,
+        account: accounts.active(&agent_id).await,
     })
 }
 
-/// Send a user turn to a running agent.
+/// Send a user turn to a running agent, with whatever was attached to it.
 #[tauri::command]
 pub async fn agent_write(
     manager: State<'_, Arc<SessionManager>>,
     session_id: String,
     prompt: String,
+    attachments: Option<Vec<Attachment>>,
 ) -> Result<(), String> {
     validate_session_id(&session_id)?;
     if prompt.len() > MAX_PROMPT_BYTES {
         return Err("prompt is too large to send".into());
     }
-    manager.send_prompt(&session_id, &prompt).await
+    let attachments = attachments.unwrap_or_default();
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(format!("at most {MAX_ATTACHMENTS} attachments per message"));
+    }
+    manager
+        .send_prompt_with(&session_id, &prompt, &attachments)
+        .await
 }
 
 /// Answer a permission request raised by the agent.
@@ -222,6 +265,14 @@ pub fn workspace_dir() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_free_text_field_is_bounded() {
+        assert!(validate_len("name", "personal").is_ok());
+        assert!(validate_len("name", &"x".repeat(MAX_FIELD)).is_ok());
+        let err = validate_len("account name", &"x".repeat(MAX_FIELD + 1)).unwrap_err();
+        assert_eq!(err, "account name is too long", "the message names the field");
+    }
 
     #[test]
     fn session_ids_are_restricted_to_a_safe_alphabet() {
@@ -293,5 +344,400 @@ mod tests {
         for stub in ["codex", "gemini", "cursor", "aider", "generic", ""] {
             assert!(!agent_is_connected(stub.into()), "{stub} must not claim to be connected");
         }
+    }
+}
+
+/* ---------------- accounts ---------------- */
+
+/// Accounts configured for an agent.
+#[tauri::command]
+pub async fn accounts_list(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+) -> Result<Vec<Account>, String> {
+    Ok(accounts.list(&agent_id).await)
+}
+
+/// The account new sessions for an agent will use.
+#[tauri::command]
+pub async fn accounts_active(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+) -> Result<Option<Account>, String> {
+    Ok(accounts.active(&agent_id).await)
+}
+
+/// Create an account and its (empty, unauthenticated) profile directory.
+#[tauri::command]
+pub async fn accounts_add(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+    name: String,
+) -> Result<Account, String> {
+    validate_len("account name", &name)?;
+    accounts.add(&agent_id, &name).await
+}
+
+#[tauri::command]
+pub async fn accounts_rename(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+    name: String,
+) -> Result<(), String> {
+    validate_len("account name", &name)?;
+    accounts.rename(&account_id, &name).await
+}
+
+/// Forget an account, deleting its profile directory and the agent's
+/// credentials inside it.
+#[tauri::command]
+pub async fn accounts_remove(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+) -> Result<(), String> {
+    accounts.remove(&account_id).await
+}
+
+/// Choose which account new sessions use.
+#[tauri::command]
+pub async fn accounts_switch(
+    accounts: State<'_, Arc<AccountStore>>,
+    agent_id: String,
+    account_id: String,
+) -> Result<(), String> {
+    accounts.set_active(&agent_id, &account_id).await
+}
+
+/// Ask the agent who is signed in to an account, and record the answer.
+#[tauri::command]
+pub async fn accounts_refresh(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+) -> Result<Option<AccountIdentity>, String> {
+    accounts.refresh_identity(&account_id).await
+}
+
+/// The command the user should run to sign this account in.
+///
+/// Login is interactive (it opens a browser), so Kora reports the command and
+/// its environment rather than trying to drive it — and the credential it
+/// produces belongs to the agent, never to Kora.
+#[tauri::command]
+pub async fn accounts_login_command(
+    accounts: State<'_, Arc<AccountStore>>,
+    account_id: String,
+) -> Result<String, String> {
+    let (program, argv, env) = accounts.login_command(&account_id).await?;
+    let env = env
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v} "))
+        .collect::<String>();
+    Ok(format!("{env}{program} {}", argv.join(" ")))
+}
+
+/* ---------------- sessions ---------------- */
+
+#[tauri::command]
+pub async fn sessions_list(
+    db: State<'_, Db>,
+    include_archived: bool,
+) -> Result<Vec<sessions::SessionMeta>, String> {
+    sessions::list(&db, include_archived).await
+}
+
+#[tauri::command]
+pub async fn sessions_save(
+    db: State<'_, Db>,
+    meta: sessions::SessionMeta,
+    lines: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    validate_session_id(&meta.id)?;
+    let id = meta.id.clone();
+    sessions::upsert(&db, meta).await?;
+    sessions::save_lines(&db, &id, &lines).await
+}
+
+#[tauri::command]
+pub async fn sessions_lines(
+    db: State<'_, Db>,
+    session_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    validate_session_id(&session_id)?;
+    sessions::lines(&db, &session_id).await
+}
+
+#[tauri::command]
+pub async fn sessions_delete(db: State<'_, Db>, session_id: String) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    sessions::delete(&db, &session_id).await
+}
+
+#[tauri::command]
+pub async fn sessions_rename(
+    db: State<'_, Db>,
+    session_id: String,
+    name: String,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    validate_len("session name", &name)?;
+    sessions::rename(&db, &session_id, &name).await
+}
+
+#[tauri::command]
+pub async fn sessions_set_flags(
+    db: State<'_, Db>,
+    session_id: String,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    sessions::set_flags(&db, &session_id, pinned, archived).await
+}
+
+/// Export a session as JSON text, for the caller to write wherever it likes.
+#[tauri::command]
+pub async fn sessions_export(db: State<'_, Db>, session_id: String) -> Result<String, String> {
+    validate_session_id(&session_id)?;
+    let export = sessions::export(&db, &session_id).await?;
+    serde_json::to_string_pretty(&export).map_err(|e| e.to_string())
+}
+
+/// Writes a session export to `path`, and returns where it landed.
+///
+/// The frontend has no filesystem access of its own, so the write happens here.
+/// `path` is taken literally apart from a leading `~`; an empty path means
+/// Kora's own exports directory.
+#[tauri::command]
+pub async fn sessions_export_file(
+    db: State<'_, Db>,
+    session_id: String,
+    path: Option<String>,
+) -> Result<String, String> {
+    validate_session_id(&session_id)?;
+    validate_len("file path", path.as_deref().unwrap_or_default())?;
+    let export = sessions::export(&db, &session_id).await?;
+    let json = serde_json::to_string_pretty(&export).map_err(|e| e.to_string())?;
+
+    let target = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => expand_tilde(p),
+        None => crate::store::data_dir()
+            .join("exports")
+            .join(format!("{}.kora.json", safe_file_stem(&export.meta.name))),
+    };
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&target, json).map_err(|e| format!("could not write {}: {e}", target.display()))?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Imports a session from a file written by [`sessions_export_file`].
+#[tauri::command]
+pub async fn sessions_import_file(
+    db: State<'_, Db>,
+    path: String,
+) -> Result<sessions::SessionMeta, String> {
+    validate_len("file path", &path)?;
+    let target = expand_tilde(path.trim());
+    let json = std::fs::read_to_string(&target)
+        .map_err(|e| format!("could not read {}: {e}", target.display()))?;
+    let parsed: sessions::SessionExport =
+        serde_json::from_str(&json).map_err(|e| format!("not a Kora session export: {e}"))?;
+    sessions::import(&db, parsed).await
+}
+
+/// `~/x` → `$HOME/x`. Anything else is used as given.
+fn expand_tilde(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "~".into())).join(rest),
+        None => PathBuf::from(path),
+    }
+}
+
+/// A session name reduced to something safe to use as a filename.
+fn safe_file_stem(name: &str) -> String {
+    let stem: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let stem = stem.trim_matches('-').to_string();
+    if stem.is_empty() {
+        "session".into()
+    } else {
+        stem
+    }
+}
+
+#[tauri::command]
+pub async fn sessions_import(
+    db: State<'_, Db>,
+    json: String,
+) -> Result<sessions::SessionMeta, String> {
+    if json.len() > MAX_IMPORT_BYTES {
+        return Err("that session export is too large to import".into());
+    }
+    let parsed: sessions::SessionExport =
+        serde_json::from_str(&json).map_err(|e| format!("not a Kora session export: {e}"))?;
+    sessions::import(&db, parsed).await
+}
+
+/* ---------------- usage ---------------- */
+
+/// Rolling seven-day totals for an account, from Kora's own record.
+#[tauri::command]
+pub async fn usage_week(
+    db: State<'_, Db>,
+    account_id: Option<String>,
+) -> Result<usage::Totals, String> {
+    usage::week(&db, account_id.as_deref()).await
+}
+
+/// Record one turn's real usage.
+#[tauri::command]
+pub async fn usage_record(
+    db: State<'_, Db>,
+    agent_id: String,
+    account_id: Option<String>,
+    model: Option<String>,
+    turn: crate::adapters::Usage,
+) -> Result<bool, String> {
+    validate_len("agent id", &agent_id)?;
+    validate_len("model", model.as_deref().unwrap_or_default())?;
+    usage::record(&db, &agent_id, account_id.as_deref(), model.as_deref(), &turn).await
+}
+
+/* ---------------- files (Phase 5) ---------------- */
+
+/// Read one attached or dropped file.
+///
+/// The whole size/binary/truncation policy lives in [`crate::files::ingest`],
+/// so a 2 GB log becomes a bounded preview rather than a 2 GB IPC message.
+#[tauri::command]
+pub async fn file_ingest(path: String) -> Result<ingest::IngestedFile, String> {
+    validate_len("file path", &path)?;
+    tokio::task::spawn_blocking(move || ingest::ingest(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Open a file in the user's editor. Returns the command that ran.
+#[tauri::command]
+pub async fn file_open_in_editor(path: String) -> Result<String, String> {
+    validate_len("file path", &path)?;
+    tokio::task::spawn_blocking(move || open::open_in_editor(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Write text to a path the user chose — the transcript's "save code block".
+#[tauri::command]
+pub async fn file_save(path: String, contents: String) -> Result<String, String> {
+    validate_len("file path", &path)?;
+    if contents.len() > MAX_PROMPT_BYTES {
+        return Err("that is too large to save from the transcript".into());
+    }
+    tokio::task::spawn_blocking(move || open::save_text(&path, &contents))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// What the agent behind a session can do, so the UI offers only what works.
+///
+/// Image attachment is gated on this: an agent with no `vision` capability is
+/// not offered an image picker rather than being sent an image it will reject.
+#[tauri::command]
+pub async fn agent_capabilities(agent_id: String) -> Result<Vec<Capability>, String> {
+    Ok(adapter_for(&agent_id)
+        .map(|a| a.capabilities().to_vec())
+        .unwrap_or_default())
+}
+
+/* ---------------- search (Phase 5) ---------------- */
+
+/// Search every saved transcript. In-session scrollback search is a frontend
+/// concern — this is the cross-session one, which needs the store.
+#[tauri::command]
+pub async fn sessions_search(
+    db: State<'_, Db>,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<sessions::SearchHit>, String> {
+    validate_len("search query", &query)?;
+    sessions::search(&db, &query, limit.unwrap_or(100)).await
+}
+
+/// Ingest bytes that never had a path — a pasted screenshot, or a file chosen
+/// through the webview's own picker.
+///
+/// The bytes arrive base64-encoded because that is how they leave the webview;
+/// the size and binary policy is the same one [`file_ingest`] applies, so how a
+/// file got here cannot change what Kora does with it.
+#[tauri::command]
+pub async fn file_ingest_bytes(
+    name: String,
+    data: String,
+    media_type: Option<String>,
+) -> Result<ingest::IngestedFile, String> {
+    use base64::Engine;
+    validate_len("file name", &name)?;
+    validate_len("media type", media_type.as_deref().unwrap_or_default())?;
+    if data.len() > MAX_INGEST_BASE64 {
+        return Err("that is too large to attach".into());
+    }
+    tokio::task::spawn_blocking(move || {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| "attachment was not valid base64".to_string())?;
+        ingest::ingest_bytes(&name, &bytes, media_type.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/* ---------------- settings (Phase 6) ---------------- */
+
+/// The user's settings, defaults included.
+#[tauri::command]
+pub async fn settings_get(settings: State<'_, Arc<SettingsStore>>) -> Result<Settings, String> {
+    Ok(settings.get().await)
+}
+
+/// Replace the settings and persist them.
+///
+/// Returns what was actually stored: the store clamps anything that would
+/// break the UI if taken literally, and the frontend renders the result rather
+/// than what it asked for.
+#[tauri::command]
+pub async fn settings_set(
+    settings: State<'_, Arc<SettingsStore>>,
+    value: Settings,
+) -> Result<Settings, String> {
+    settings.set(value).await
+}
+
+/* ---------------- version (Phase 6) ---------------- */
+
+/// Where releases are published. Kora does not update itself in v1.
+const RELEASES_URL: &str = "https://github.com/faithdevs/kora/releases";
+
+/// What `/version` and `/update` report.
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionInfo {
+    pub version: String,
+    /// Target triple this build runs on.
+    pub platform: String,
+    /// Where to look for a newer one.
+    pub releases_url: String,
+    /// Whether this build can update itself. It cannot, and says so.
+    pub self_update: bool,
+}
+
+#[tauri::command]
+pub fn version_info() -> VersionInfo {
+    VersionInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: std::env::consts::OS.to_string(),
+        releases_url: RELEASES_URL.to_string(),
+        self_update: false,
     }
 }

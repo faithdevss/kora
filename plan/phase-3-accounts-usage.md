@@ -70,3 +70,91 @@ src/
 6. WEEK meter UI copy reads "tracked usage" (or equivalent honest phrasing), never implies it's an authoritative account quota/limit unless a real quota API was confirmed and wired during implementation.
 7. Closing and reopening the app restores saved sessions (names, transcripts, pin/archive state) via `/session list`; exporting a session produces a file that imports cleanly into a fresh install.
 8. A subscription-auth (Pro/Max) account never shows an unqualified dollar "cost" figure — either labeled "estimated API-equivalent" or tokens-only.
+
+---
+
+## Spike Results — account model, auth, and models
+
+Run against `claude` 2.1.223 on 2026-08-07, before any implementation. Three findings changed the design; the amendments they imply are listed at the end.
+
+### What was tested
+
+| # | Question | Result |
+|---|---|---|
+| 1 | Does the CLI support per-account auth isolation? | **Yes, via `CLAUDE_CONFIG_DIR`.** Pointing it at a fresh directory yields `{"loggedIn": false, "authMethod": "none"}` while the default profile stays logged in. The CLI creates and owns everything inside that directory. |
+| 2 | Can Kora identify an account without handling its credential? | **Yes.** `claude auth status` prints JSON: `loggedIn`, `authMethod` (`claude.ai` for subscription login), `apiProvider`, `email`, `orgId`, `orgName`, `subscriptionType` (`pro`). That is real account identity *and* the auth-type signal acceptance criterion 8 needs, with no secret involved. |
+| 3 | How is an account added? | `claude auth login` (interactive, browser) / `auth logout` / `auth status`. There is also `setup-token` for a long-lived subscription token. |
+| 4 | Can the real model list be queried? | **Yes** — `control_request` with `{"subtype": "list_models"}` returns each model's `value`, `resolvedModel`, `displayName`, `description`, and capability flags, live from the authenticated CLI. Free: no API call. |
+| 5 | Is the mockup's model list still accurate? | **No.** The real list is Default/Sonnet 5, Opus 5, Haiku 4.5, and Fable; the Phase 1 fixture still names `claude-opus-4.1` and friends, which are not values the CLI accepts. |
+
+### Decision — accounts are config directories, and Kora stores no credentials
+
+Each Kora account is a `CLAUDE_CONFIG_DIR` under Kora's app-support directory. Adding an account runs the CLI's own `auth login` against a new directory; Claude Code stores its credential wherever it normally does, and Kora persists only `{ id, name, dir, email, orgName, authMethod, subscriptionType }` — all of it non-secret, all of it obtained from `auth status`.
+
+This is what the master plan's Security #6 asks for ("prefer native credential-scoping mechanisms over env vars"), and it is stronger than the original plan: there is no Kora-owned secret to leak, to log, or to migrate. The one env var involved (`CLAUDE_CONFIG_DIR`) carries a path, never a credential.
+
+### Amendments to this phase file
+
+1. **Keychain integration is not implemented, and that is deliberate.** The in-scope bullet assumed Kora would store credentials in the macOS Keychain. It does not, because it never possesses one. **Acceptance criterion 2 is therefore restated:** Kora must store no credential material on disk at all — verified by inspecting its own account store for anything secret-shaped — rather than by finding a Kora-owned keychain entry. API-key accounts (which would need Kora-held secrets) are deferred; if they are added later, the keychain path in the original bullet applies to them alone.
+2. **The WEEK meter caveat is withdrawn**, as already amended in `00-master-plan.md` after the Phase 2 spike: `rate_limit_event` carries real `seven_day` utilization with a reset time. **Acceptance criterion 6 is restated:** the meter shows the agent's real reported utilization, labelled with its window, and falls back to showing nothing (not to a locally-invented figure) for agents that report none.
+3. **The model list is queried, never hardcoded** — `list_models` at handshake replaces the Phase 1 fixture, which is stale by two model generations.
+
+---
+
+## Implementation notes
+
+Decisions this phase file asked to be made and written down during implementation.
+
+### Account switching restarts the conversation, and says so first
+
+Session history lives inside the account's own profile directory, so the agent
+under the new account has never seen it — `--resume` cannot carry it across.
+Switching therefore kills the process and spawns a **fresh** one (no resume id),
+after a `warn` line stating that the conversation does not carry over. Kora's own
+transcript stays on screen and stays saved locally, so nothing the user can see
+is lost; only the agent's memory resets. Clicking an account in the `/accounts`
+list does exactly the same thing as typing the switch.
+
+### `/accounts` verbs
+
+`add`, `login`, `refresh`, `rename`, `remove` reach the backend; a bare name (or
+`switch <name>`) is a switch; no argument lists. `login` prints the agent's own
+login command with `CLAUDE_CONFIG_DIR` set, rather than driving it — it is
+interactive and browser-based, and this is what keeps the credential out of
+Kora. `remove` deletes the profile directory, which is where the agent kept its
+sign-in; Kora has no credential of its own to delete.
+
+### Session persistence
+
+Transcripts auto-save to SQLite on a 400 ms debounce after any line changes, and
+`dispose()` flushes what is still pending. On start, up to 8 non-archived
+sessions come back as tabs (pinned first, then most recent); their agents are
+**not** spawned until a tab is focused, so restoring eight tabs does not start
+eight CLIs. A restored tab carries its `agent_uuid`, so focusing it resumes the
+real conversation where the CLI still has it.
+
+`/session delete` on a tab that stays open detaches it: the transcript remains on
+screen but auto-save stops, otherwise the next appended line would write the
+record straight back. `/session save` re-attaches it.
+
+Export/import go through the backend (`sessions_export_file` /
+`sessions_import_file`) because the webview has no filesystem access and this
+build adds no dialog/fs plugin. `~` is expanded; with no path, exports land in
+Kora's own `exports/` directory. An import always lands under a fresh id and
+drops the `agent_uuid`, which belongs to the machine that made it.
+
+### Cost
+
+`store/pricing.rs` prices the rolling seven-day window per model, so `Totals`
+carries both `cost_usd` (what the agent reported) and `estimated_cost_usd` (list
+price for those tokens; `None` for models with no entry, never a guessed rate).
+The panel labels the whole card "API-EQUIVALENT ESTIMATE" and the account line
+"not billed — flat plan" whenever the account is subscription-auth, which
+satisfies acceptance criterion 8 without hiding the number.
+
+### Not done
+
+API-key accounts for Claude Code — the CLI's own `auth login` covers
+subscription and API-key sign-in inside the profile directory, and a Kora-held
+key would reintroduce exactly the secret this design removed. If it is ever
+wanted, the original keychain bullet applies to that path alone.

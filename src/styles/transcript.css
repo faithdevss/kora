@@ -18,7 +18,8 @@
   color: var(--ac);
 }
 
-.k-mark {
+.k-mark,
+.k-hit {
   background: #e0a34a55;
   color: #fff;
   border-radius: 2px;
@@ -157,7 +158,209 @@
   background: var(--green);
 }
 
+/* ---------- rendered markdown ---------- */
+
+.k-md > :first-child {
+  margin-top: 0;
+}
+.k-md > :last-child {
+  margin-bottom: 0;
+}
+
+.k-md p {
+  margin: 0 0 8px;
+}
+
+.k-md h1,
+.k-md h2,
+.k-md h3,
+.k-md h4 {
+  margin: 14px 0 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.k-md ul,
+.k-md ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.k-md li {
+  margin: 2px 0;
+}
+
+.k-md blockquote {
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  color: var(--dim);
+}
+
+.k-md a {
+  color: var(--blue);
+}
+
+.k-md code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: #14161c;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.k-md pre {
+  margin: 0 0 9px;
+  background: #0a0b0e;
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  padding: 11px 13px;
+  overflow-x: auto;
+}
+
+.k-md pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.k-md table {
+  border-collapse: collapse;
+  margin: 0 0 9px;
+  font-size: 12px;
+  display: block;
+  overflow-x: auto;
+}
+
+.k-md th,
+.k-md td {
+  border: 1px solid var(--border-dim);
+  padding: 4px 9px;
+  text-align: left;
+}
+
+.k-md th {
+  color: var(--text-bright);
+  background: #14161c;
+}
+
+.k-md details {
+  margin: 0 0 8px;
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+
+.k-md summary {
+  cursor: pointer;
+  color: var(--text-bright);
+}
+
+.k-md hr {
+  border: none;
+  border-top: 1px solid var(--border-dim);
+  margin: 12px 0;
+}
+
+/* highlight.js — one accent per token class, tuned to the terminal palette */
+.hljs-comment,
+.hljs-quote {
+  color: var(--dim3);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section {
+  color: #c792ea;
+}
+.hljs-string,
+.hljs-attr,
+.hljs-template-string {
+  color: var(--green);
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet {
+  color: var(--amber);
+}
+.hljs-title,
+.hljs-name,
+.hljs-title.function_ {
+  color: var(--blue);
+}
+.hljs-type,
+.hljs-built_in,
+.hljs-class .hljs-title {
+  color: #7fd1c1;
+}
+.hljs-variable,
+.hljs-params,
+.hljs-property {
+  color: #c4cad4;
+}
+.hljs-meta,
+.hljs-doctag {
+  color: var(--dim2);
+}
+.hljs-addition {
+  color: var(--green);
+}
+.hljs-deletion {
+  color: var(--red);
+}
+
 /* ---------- code block ---------- */
+
+.k-code-wrap {
+  margin: 0 0 0 24px;
+}
+
+.k-code-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 2px 4px;
+  font-size: 10.5px;
+  color: var(--dim2);
+}
+
+.k-code-lang {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.k-code-path {
+  color: var(--dim3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+.k-code-spacer {
+  flex: 1;
+}
+
+.k-code-btn {
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 10.5px;
+  color: var(--dim2);
+}
+
+.k-code-btn:hover {
+  color: var(--ac);
+}
+
+.k-code-wrap .k-code {
+  margin: 0;
+}
 
 .k-code {
   margin: 0 0 0 24px;
@@ -175,17 +378,71 @@
   color: #c4cad4;
 }
 
+/* ---------- diff viewer ---------- */
+
+.k-diff {
+  background: #0a0b0e;
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  padding: 9px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.k-diff-row,
+.k-diff-side {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px;
+  white-space: pre;
+}
+
+.k-diff-no {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  color: var(--dim3);
+  user-select: none;
+}
+
+.k-diff-sign {
+  flex: none;
+  width: 8px;
+  user-select: none;
+}
+
+.k-diff-text {
+  flex: 1;
+}
+
+.k-diff-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+}
+
+.k-diff-toggle {
+  margin: 0 0 4px 2px;
+}
+
 .k-diff-add {
   color: var(--green);
+  background: rgba(63, 185, 80, 0.08);
 }
 .k-diff-del {
   color: var(--red);
+  background: rgba(248, 81, 73, 0.08);
 }
 .k-diff-meta {
   color: var(--blue);
 }
 .k-diff-ctx {
   color: var(--dim3);
+}
+.k-diff-empty {
+  background: #08090c;
 }
 
 /* ---------- out / dim / ok / err ---------- */
@@ -520,6 +777,29 @@
 .k-card-healthy {
   font-size: 11.5px;
   color: var(--green);
+}
+
+/* Suggestions: quiet by default, amber only when the condition is urgent. */
+.k-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.k-tip-text {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.k-tip-text.is-urgent {
+  color: var(--amber);
+}
+
+.k-tip-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .k-card-rule {

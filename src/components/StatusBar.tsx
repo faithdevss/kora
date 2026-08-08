@@ -1,6 +1,7 @@
 import type { Session } from '../types/agent';
 import { acctOf, agentOf, modelOf } from '../state/appState';
-import { CTX_WARN, compactTarget, ctxTone, fmt } from '../state/format';
+import { ctxTone, fmt } from '../state/format';
+import { suggestions } from '../state/suggestions';
 import { Bar, Dot } from './Bits';
 
 interface Props {
@@ -35,12 +36,9 @@ export function StatusBar({ session, onSuggest }: Props) {
     ? `Reported by ${agent.name}${live.resetsAt ? ` · resets ${new Date(live.resetsAt * 1000).toLocaleString()}` : ''}`
     : `${agent.name} has not reported quota usage yet`;
 
-  const suggestion =
-    cpct >= CTX_WARN
-      ? `/compact to free ~${fmt(session.ctxUsed - compactTarget(session.ctxWin))} tokens`
-      : wpct >= 0.9
-        ? 'weekly limit near — switch account'
-        : '';
+  // One nudge at a time, from the same rules engine the /usage panel lists in
+  // full — and only ever a real command, never a Kora-side edit.
+  const suggestion = suggestions(session)[0];
 
   return (
     <div className="k-statusbar">
@@ -84,13 +82,14 @@ export function StatusBar({ session, onSuggest }: Props) {
           <span className="k-status-week">{weekText}</span>
         </div>
 
-        {suggestion ? (
+        {suggestion?.chips.length ? (
           <button
             type="button"
             className="k-suggest"
-            onClick={() => onSuggest(suggestion.startsWith('/compact') ? '/compact' : '/accounts')}
+            title={suggestion.text}
+            onClick={() => onSuggest(suggestion.chips[0].cmd)}
           >
-            ◆ {suggestion}
+            ◆ {suggestion.chips[0].label}
           </button>
         ) : null}
       </div>

@@ -14,6 +14,7 @@ const actions = {
   pickItem: () => {},
   fillInput: () => {},
   answerPermission: () => {},
+  code: { save: () => {}, openInEditor: () => {} },
 };
 
 function withLines(lines: TranscriptLine[]): Session {
@@ -28,7 +29,8 @@ function renderLines(lines: TranscriptLine[], query?: string) {
 
 describe('transcript renderers', () => {
   it('renders every line type without crashing', () => {
-    const data = usageData(focusedSession(initialState()));
+    const state = initialState();
+    const data = usageData(state, focusedSession(state));
     const lines: TranscriptLine[] = [
       { key: '1', t: 'banner' },
       { key: '2', t: 'cmd', text: 'do the thing', atts: 2 },

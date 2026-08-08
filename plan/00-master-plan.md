@@ -18,7 +18,7 @@ Kora is "one terminal, every agent": a fast, lightweight desktop app that runs m
 - **Frontend:** TypeScript + React + Vite. React chosen because the design prototype (`Kora Terminal.dc.html`) is already written against a `React.createElement`-based runtime (`support.js`, a prototyping-tool runtime — **not** shippable, do not reuse it directly, but its component shape maps cleanly to real React).
 - **Styling:** Plain CSS (CSS Modules or vanilla `.css` files), not a utility framework like Tailwind. The mockup specifies exact hex values and pixel sizes per element — reproduce those tokens directly (see Design Tokens below) rather than remapping into a utility system.
 - **Backend/process layer:** Rust. ~~PTY subprocess spawning via `portable-pty`~~ — **amended after the Phase 2 spike:** agents are driven in structured mode (`--input-format/--output-format stream-json`) over plain stdin/stdout pipes, so no terminal emulation and no `portable-pty` dependency. Tauri commands + events bridge Rust ↔ React.
-- **Credential storage:** OS keychain via Tauri's `keyring` / stronghold plugin (macOS Keychain first; Phase 3).
+- **Credential storage:** ~~OS keychain via Tauri's `keyring` / stronghold plugin~~ — **amended after the Phase 3 spike:** Kora stores no credentials. Each account is a `CLAUDE_CONFIG_DIR` that the wrapped CLI owns and authenticates itself; Kora persists only non-secret identity (`email`, `orgName`, `subscriptionType`) read back from `claude auth status`. See `phase-3-accounts-usage.md` → "Spike Results".
 - **Font:** JetBrains Mono (Google Fonts, as referenced in the mockup) — bundle it locally instead of a runtime Google Fonts fetch, since docs call for no-network-by-default / low startup latency.
 
 ---
