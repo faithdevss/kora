@@ -12,3 +12,4 @@ src-tauri/gen/
 .vscode/
 .claude
 docs
+resume.md
