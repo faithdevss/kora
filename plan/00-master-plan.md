@@ -1,6 +1,6 @@
 # Kora — Master Plan
 
-> Source docs: `docs/features.gpt.md` (primary, 30 features), `docs/features.claude.md` / `docs/features.gemini..md` (identical to each other, narrower — secondary confirmation), `docs/design/Kora Terminal.dc.html` (interactive design prototype, fake data) + `docs/design/.thumbnail` (reference screenshot).
+> Source docs: `docs/features.gpt.md` (primary, 30 features), `docs/features.claude.md` (narrower — secondary confirmation), `docs/design/Kora Terminal.dc.html` (interactive design prototype, fake data) + `docs/design/.thumbnail` (reference screenshot).
 
 Read this file first in every phase session. Then read only the one `phase-N-*.md` you're executing — do not need the others.
 

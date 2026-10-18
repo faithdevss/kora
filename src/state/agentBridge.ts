@@ -512,7 +512,7 @@ export const offlineBridge: AgentBridge = {
   versionInfo: async () => ({
     version: '0.0.0-preview',
     platform: 'browser',
-    releases_url: 'https://github.com/faithdevs/kora/releases',
+    releases_url: 'https://github.com/faithdevss/kora/releases',
     self_update: false,
   }),
 

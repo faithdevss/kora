@@ -2,6 +2,12 @@
   "name": "kora",
   "private": true,
   "version": "0.1.0",
+  "description": "One terminal, every agent — a desktop app for running AI coding agent CLIs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/faithdevss/kora.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

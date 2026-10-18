@@ -66,7 +66,7 @@ src/
 ## Reference
 
 - `docs/features.gpt.md` §3 (Model Management), §26 (Provider Adapter Architecture) — adapter must expose commands/models/auth/capabilities/pricing/context-limits per provider, even if only Claude's are populated for real right now.
-- `docs/features.claude.md` / `docs/features.gemini..md` §3 — "Agent Adapter Architecture," confirms adapters should support full tool-use execution, bash tool execution, file edits for the Claude Code adapter specifically.
+- `docs/features.claude.md` §3 — "Agent Adapter Architecture," confirms adapters should support full tool-use execution, bash tool execution, file edits for the Claude Code adapter specifically.
 - Phase 1's `commandRouter.ts` and transcript line types — do not change their shape; only change where `resp` line data comes from (real stream vs. mock array).
 
 ## Acceptance Criteria

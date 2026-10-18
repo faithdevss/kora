@@ -48,7 +48,7 @@ src/
 ## Reference
 
 - `docs/features.gpt.md` §20–§21 (Command Palette, Keyboard First), §24 (Notifications), §27 (Performance), §29 (Settings), §30 (Extensibility).
-- `docs/features.claude.md` / `docs/features.gemini..md` §7 (Local Caching Layer, Async Streaming Render Engine). Note: §7's "Zero Bloat Policy" (no webviews, pure-TUI stack) was overridden by the master plan's Tauri decision — don't treat it as a binding target here; the perf pass documents real measured numbers instead.
+- `docs/features.claude.md` §7 (Local Caching Layer, Async Streaming Render Engine). Note: §7's "Zero Bloat Policy" (no webviews, pure-TUI stack) was overridden by the master plan's Tauri decision — don't treat it as a binding target here; the perf pass documents real measured numbers instead.
 - Phase 2's `AgentAdapter` trait doc comments — this phase should not need to modify that trait, only document/finalize it as the public extension surface.
 
 ## Acceptance Criteria

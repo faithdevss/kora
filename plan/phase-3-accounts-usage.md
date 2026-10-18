@@ -57,7 +57,7 @@ src/
 ## Reference
 
 - `docs/features.gpt.md` §2 (Multi Account Management), §5 (Usage Dashboard), §6 (Statistics), §12 (Cost Tracking).
-- `docs/features.claude.md` / `docs/features.gemini..md` §2 (Unified Credentials Store, OS keychain integration), §4 (Real-Time Telemetry & Token Optimization — Session/Weekly/Monthly usage, `/usage`, `/statistics`).
+- `docs/features.claude.md` §2 (Unified Credentials Store, OS keychain integration), §4 (Real-Time Telemetry & Token Optimization — Session/Weekly/Monthly usage, `/usage`, `/statistics`).
 - Design mockup's `ACCT` fixture shape (`plan: string, key: masked string, wUsed/wLim: number, unit: string`) is the target data shape for the real store — keep field names consistent so Phase 1's `PanelLine`/list renderers need minimal changes.
 
 ## Acceptance Criteria

@@ -2,7 +2,9 @@
 name = "kora"
 version = "0.1.0"
 description = "Kora — one terminal, every agent"
-authors = ["Kora"]
+authors = ["Saimum Islam"]
+license = "MIT"
+repository = "https://github.com/faithdevss/kora"
 edition = "2021"
 rust-version = "1.77"
 

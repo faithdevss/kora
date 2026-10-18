@@ -51,7 +51,7 @@ src/
 ## Reference
 
 - `docs/features.gpt.md` §13–§19 (Search, Clipboard, Image, File, Drag & Drop, Rich Markdown, Code Block Utilities).
-- `docs/features.claude.md` / `docs/features.gemini..md` §4 ("Smart File Context Ingestion," truncated preview before send), §5 (Rich Media & Image Pasting, Clipboard & Native Selection, In-Session Incremental Search, Diff viewer).
+- `docs/features.claude.md` §4 ("Smart File Context Ingestion," truncated preview before send), §5 (Rich Media & Image Pasting, Clipboard & Native Selection, In-Session Incremental Search, Diff viewer).
 - Phase 1's `SearchOverlay.tsx` and attachment-chip UI — extend, don't rewrite.
 
 ## Acceptance Criteria

@@ -465,7 +465,7 @@ export function makeFakeBridge(): FakeBridge {
       return {
         version: '0.1.0',
         platform: 'darwin',
-        releases_url: 'https://github.com/faithdevs/kora/releases',
+        releases_url: 'https://github.com/faithdevss/kora/releases',
         self_update: false,
       };
     },

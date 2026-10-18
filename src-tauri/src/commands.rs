@@ -718,7 +718,7 @@ pub async fn settings_set(
 /* ---------------- version (Phase 6) ---------------- */
 
 /// Where releases are published. Kora does not update itself in v1.
-const RELEASES_URL: &str = "https://github.com/faithdevs/kora/releases";
+const RELEASES_URL: &str = "https://github.com/faithdevss/kora/releases";
 
 /// What `/version` and `/update` report.
 #[derive(Debug, Clone, Serialize)]
